@@ -1,0 +1,131 @@
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+import { GpxParseError, parseGpx, type GpxParseResult } from "@/lib/gpx";
+
+type Status = "idle" | "loading" | "success" | "error";
+
+export function GpxUpload() {
+  const [status, setStatus] = useState<Status>("idle");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [result, setResult] = useState<GpxParseResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = useCallback(async (file: File) => {
+    if (!file.name.toLowerCase().endsWith(".gpx")) {
+      setStatus("error");
+      setError("Bitte eine .gpx-Datei auswählen.");
+      return;
+    }
+
+    setStatus("loading");
+    setFileName(file.name);
+    setError(null);
+
+    try {
+      const text = await file.text();
+      const parsed = parseGpx(text);
+      setResult(parsed);
+      setStatus("success");
+    } catch (err) {
+      setResult(null);
+      setStatus("error");
+      setError(
+        err instanceof GpxParseError
+          ? err.message
+          : "Die Datei konnte nicht verarbeitet werden."
+      );
+    }
+  }, []);
+
+  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFile(file);
+    e.target.value = "";
+  };
+
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFile(file);
+  };
+
+  return (
+    <div className="w-full max-w-xl">
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragging(true);
+        }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={onDrop}
+        onClick={() => inputRef.current?.click()}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") inputRef.current?.click();
+        }}
+        className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-16 text-center cursor-pointer transition-colors ${
+          isDragging
+            ? "border-zinc-900 bg-zinc-100 dark:border-zinc-100 dark:bg-zinc-900"
+            : "border-zinc-300 dark:border-zinc-700"
+        }`}
+      >
+        <p className="text-base font-medium text-zinc-900 dark:text-zinc-100">
+          GPX-Datei hierher ziehen oder klicken zum Auswählen
+        </p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">.gpx</p>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".gpx,application/gpx+xml"
+          className="hidden"
+          onChange={onInputChange}
+        />
+      </div>
+
+      {status === "loading" && (
+        <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">
+          Verarbeite {fileName}…
+        </p>
+      )}
+
+      {status === "error" && error && (
+        <p className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+      )}
+
+      {status === "success" && result && (
+        <div className="mt-6 rounded-xl border border-zinc-200 p-6 dark:border-zinc-800">
+          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            {fileName}
+          </p>
+          <dl className="mt-3 grid grid-cols-3 gap-4 text-sm">
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">Distanz</dt>
+              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
+                {(result.distanceMeters / 1000).toFixed(1)} km
+              </dd>
+            </div>
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">Höhenmeter</dt>
+              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
+                {result.elevationGainMeters !== null
+                  ? `${Math.round(result.elevationGainMeters)} m`
+                  : "nicht zuverlässig verfügbar"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">Trackpunkte</dt>
+              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
+                {result.points.length}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      )}
+    </div>
+  );
+}

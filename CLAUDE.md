@@ -1,27 +1,14 @@
-@AGENTS.md
+# RouteRider Tire Pressure Calculator
 
-# RouteRider
+Kernprinzip: GPX Upload → Map Matching gegen OSM → Surface-Mix → Bike-Setup →
+Pressure Engine (Berto-Formel) → Front/Rear-Empfehlung.
 
-RouteRider berechnet Reifendruck-Empfehlungen für Radfahrer auf Basis
-einer hochgeladenen Route. Kernablauf:
+Vollständige Produktdefinition: docs/RouteRider Tire Pressure.pdf
+Bereits aufgelöste Kernentscheidungen (Tubeless-Logik, Map Matching, Safety Bounds,
+Surface Inference): docs/RouteRider Tire Pressure - Resolved Decisions D4-D7.md
+Fueling Strategy ist Scope für v0.2, NICHT Teil des aktuellen Builds:
+docs/RouteRider - Fueling Strategy v0.2 Spec (Design Preview).md
 
-GPX Upload → Map Matching gegen OSM → Surface-Mix → Bike-Setup →
-Pressure Engine (Berto-Formel) → Front/Rear-Empfehlung
-
-## Produktdefinition & Kernentscheidungen
-
-- **Haupt-Produktdefinition:** [docs/RouteRider Tire Pressure.md](docs/RouteRider%20Tire%20Pressure.md)
-- **Bereits aufgelöste Kernentscheidungen (D4–D7):** [docs/RouteRider Tire Pressure - Resolved Decisions D4-D7.md](docs/RouteRider%20Tire%20Pressure%20-%20Resolved%20Decisions%20D4-D7.md)
-
-Beide Dateien sind aktuell Platzhalter und werden noch befüllt.
-
-## Wichtig: Nicht eigenständig entscheiden
-
-Bei Unsicherheit zu einem der folgenden Themen **nicht selbst entscheiden**,
-sondern beim Nutzer nachfragen:
-
-- Produktlogik
-- Pressure-Berechnung (Berto-Formel und Ableitungen)
-- Surface-Klassifizierung
-- Map-Matching-Architektur
-- UX
+Bei Unsicherheit über Produktlogik, Pressure-Berechnung, Surface-Klassifizierung,
+Map-Matching-Architektur, UX oder externe Services: NICHT eigenständig entscheiden,
+sondern nachfragen (siehe Hauptdokument, Section 45 "Development Rule").

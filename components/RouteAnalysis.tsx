@@ -70,7 +70,7 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
         >
           {status === "loading"
             ? progress
-              ? `Route wird analysiert… (${progress.completedChunks}/${progress.totalChunks})`
+              ? `Abschnitt ${progress.completedChunks} von ${progress.totalChunks} wird geladen…`
               : "Route wird analysiert…"
             : status === "error"
               ? "Erneut versuchen"

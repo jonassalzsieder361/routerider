@@ -1,7 +1,13 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCallback, useRef, useState } from "react";
 import { GpxParseError, parseGpx, type GpxParseResult } from "@/lib/gpx";
+
+const RouteMap = dynamic(
+  () => import("@/components/RouteMap").then((mod) => mod.RouteMap),
+  { ssr: false }
+);
 
 type Status = "idle" | "loading" | "success" | "error";
 
@@ -98,32 +104,30 @@ export function GpxUpload() {
       )}
 
       {status === "success" && result && (
-        <div className="mt-6 rounded-xl border border-zinc-200 p-6 dark:border-zinc-800">
-          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-            {fileName}
-          </p>
-          <dl className="mt-3 grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Distanz</dt>
-              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
-                {(result.distanceMeters / 1000).toFixed(1)} km
-              </dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Höhenmeter</dt>
-              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
-                {result.elevationGainMeters !== null
-                  ? `${Math.round(result.elevationGainMeters)} m`
-                  : "nicht zuverlässig verfügbar"}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Trackpunkte</dt>
-              <dd className="font-medium text-zinc-900 dark:text-zinc-100">
-                {result.points.length}
-              </dd>
-            </div>
-          </dl>
+        <div className="mt-6 flex flex-col gap-4">
+          <div className="rounded-xl border border-zinc-200 p-6 dark:border-zinc-800">
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {fileName}
+            </p>
+            <dl className="mt-3 grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <dt className="text-zinc-500 dark:text-zinc-400">Distanz</dt>
+                <dd className="font-medium text-zinc-900 dark:text-zinc-100">
+                  {(result.distanceMeters / 1000).toFixed(1)} km
+                </dd>
+              </div>
+              <div>
+                <dt className="text-zinc-500 dark:text-zinc-400">Höhenmeter</dt>
+                <dd className="font-medium text-zinc-900 dark:text-zinc-100">
+                  {result.elevationGainMeters !== null
+                    ? `${Math.round(result.elevationGainMeters)} m`
+                    : "nicht zuverlässig verfügbar"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <RouteMap points={result.points} />
         </div>
       )}
     </div>

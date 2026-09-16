@@ -72,7 +72,9 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
             ? progress
               ? `Route wird analysiert… (${progress.completedChunks}/${progress.totalChunks})`
               : "Route wird analysiert…"
-            : "Route analysieren"}
+            : status === "error"
+              ? "Erneut versuchen"
+              : "Route analysieren"}
         </button>
 
         {status === "error" && error && (

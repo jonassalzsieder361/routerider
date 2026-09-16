@@ -37,7 +37,18 @@ export interface MapMatcher {
 // Adjustable, not fixed truths — kept centralized here, matching the pattern used for terrain modifiers.
 const SEARCH_RADIUS_METERS = 20; // within the documented 15-25 m range
 const MIN_POINT_SPACING_METERS = 20; // resample route before matching to stabilize bearing calculation
-const CHUNK_TARGET_SEGMENTS = 40; // route segments per Overpass query
+const CHUNK_TARGET_DISTANCE_METERS = 40_000; // route length per Overpass query (target range: 30-50 km)
+
+// The `around` query is sent only for a thinned subset of each chunk's points (every Nth), to
+// keep the query small — but that opens gaps between the points we actually query around. A
+// point exactly midway between two kept points can be up to (stride * MIN_POINT_SPACING_METERS)
+// / 2 away from the nearest kept point, so the query radius is widened by that amount to
+// guarantee we still fetch every way within SEARCH_RADIUS_METERS of the *original* dense route —
+// scoreCandidates still clamps to SEARCH_RADIUS_METERS afterwards, so this only affects which
+// ways are fetched as candidates, never the actual match distance.
+const AROUND_POINT_STRIDE = 8; // within the suggested every-5th-to-10th-point range
+const AROUND_QUERY_RADIUS_METERS =
+  SEARCH_RADIUS_METERS + (AROUND_POINT_STRIDE * MIN_POINT_SPACING_METERS) / 2;
 
 // Spacing between chunk requests, on top of the retry/backoff in app/api/overpass/route.ts —
 // the public Overpass instance starts returning 429/504 after just a couple of rapid requests.
@@ -88,52 +99,59 @@ function buildSegments(points: LatLon[]): RouteSegment[] {
   return segments;
 }
 
-interface ChunkBounds {
-  south: number;
-  west: number;
-  north: number;
-  east: number;
-}
-
 interface Chunk {
   segments: RouteSegment[];
-  bounds: ChunkBounds;
+  aroundPoints: LatLon[];
+}
+
+/** Every Nth point of the chunk's own route geometry, always keeping the first and last point. */
+function thinPoints(points: LatLon[], stride: number): LatLon[] {
+  if (points.length <= 2) return points;
+
+  const thinned: LatLon[] = [];
+  for (let i = 0; i < points.length; i += stride) thinned.push(points[i]);
+
+  const last = points[points.length - 1];
+  if (thinned[thinned.length - 1] !== last) thinned.push(last);
+
+  return thinned;
+}
+
+function chunkRoutePoints(slice: RouteSegment[]): LatLon[] {
+  const points = [slice[0].start];
+  for (const segment of slice) points.push(segment.end);
+  return points;
 }
 
 /**
- * Groups consecutive segments into batches, one Overpass query per batch (bbox padded by the
- * search radius), rather than one query per point/segment — required to stay usable on real
- * routes with thousands of points without hitting the public instance's rate limits.
+ * Groups consecutive segments into batches by accumulated route distance — one Overpass query
+ * per ~CHUNK_TARGET_DISTANCE_METERS of route — rather than one query per point/segment or one
+ * for the whole route, to stay usable on real routes with thousands of points without hitting
+ * the public instance's rate limits.
  */
-function chunkSegments(
-  segments: RouteSegment[],
-  targetSegmentsPerChunk: number,
-  paddingMeters: number
-): Chunk[] {
+function chunkSegments(segments: RouteSegment[], targetDistanceMeters: number): Chunk[] {
   const chunks: Chunk[] = [];
+  let currentSlice: RouteSegment[] = [];
+  let currentDistance = 0;
 
-  for (let i = 0; i < segments.length; i += targetSegmentsPerChunk) {
-    const slice = segments.slice(i, i + targetSegmentsPerChunk);
-    const lats = slice.flatMap((s) => [s.start.lat, s.end.lat]);
-    const lons = slice.flatMap((s) => [s.start.lon, s.end.lon]);
+  for (const segment of segments) {
+    currentSlice.push(segment);
+    currentDistance += haversineDistance(segment.start, segment.end);
 
-    const south = Math.min(...lats);
-    const north = Math.max(...lats);
-    const west = Math.min(...lons);
-    const east = Math.max(...lons);
+    if (currentDistance >= targetDistanceMeters) {
+      chunks.push({
+        segments: currentSlice,
+        aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
+      });
+      currentSlice = [];
+      currentDistance = 0;
+    }
+  }
 
-    const latPad = paddingMeters / 111320;
-    const lonPad =
-      paddingMeters / (111320 * Math.cos(((south + north) / 2) * Math.PI / 180));
-
+  if (currentSlice.length > 0) {
     chunks.push({
-      segments: slice,
-      bounds: {
-        south: south - latPad,
-        north: north + latPad,
-        west: west - lonPad,
-        east: east + lonPad,
-      },
+      segments: currentSlice,
+      aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
     });
   }
 
@@ -151,11 +169,11 @@ interface OverpassElement {
   geometry?: OverpassGeometryNode[];
 }
 
-async function fetchWaysForBounds(bounds: ChunkBounds): Promise<OsmWay[]> {
+async function fetchWaysAround(points: LatLon[], radiusMeters: number): Promise<OsmWay[]> {
   const response = await fetch("/api/overpass", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bounds),
+    body: JSON.stringify({ points, radiusMeters }),
   });
 
   if (!response.ok) {
@@ -293,21 +311,21 @@ async function matchRoute(
 
   if (segments.length === 0) return [];
 
-  const chunks = chunkSegments(segments, CHUNK_TARGET_SEGMENTS, SEARCH_RADIUS_METERS);
+  const chunks = chunkSegments(segments, CHUNK_TARGET_DISTANCE_METERS);
 
   const results: MatchedSegment[] = [];
   let previousMatchedWay: OsmWay | null = null;
 
   // Sequential, spaced-out requests: a good citizen of the public Overpass instance (docs,
   // Section 41), which otherwise starts rate-limiting after just a couple of rapid requests.
-  // Each chunk's ways are scored only against that chunk's own segments — a chunk's bbox is
-  // already padded by the search radius for those segments, so nothing is missed, and this
-  // avoids scoring every segment in the route against every way ever fetched (which would be
-  // O(totalSegments × totalWays) and can stall the browser on long, multi-chunk routes).
+  // Each chunk's ways are scored only against that chunk's own segments — an `around` query
+  // already covers those segments (see AROUND_QUERY_RADIUS_METERS), so nothing is missed, and
+  // this avoids scoring every segment in the route against every way ever fetched (which would
+  // be O(totalSegments × totalWays) and can stall the browser on long, multi-chunk routes).
   for (let i = 0; i < chunks.length; i++) {
     if (i > 0) await sleep(CHUNK_DELAY_MS);
 
-    const chunkWays = await fetchWaysForBounds(chunks[i].bounds);
+    const chunkWays = await fetchWaysAround(chunks[i].aroundPoints, AROUND_QUERY_RADIUS_METERS);
 
     for (const segment of chunks[i].segments) {
       const candidates = scoreCandidates(

@@ -106,6 +106,9 @@ function buildSegments(points: LatLon[]): RouteSegment[] {
 interface Chunk {
   segments: RouteSegment[];
   aroundPoints: LatLon[];
+  rawPointCount: number;
+  rangeStartKm: number;
+  rangeEndKm: number;
 }
 
 /** Every Nth point of the chunk's own route geometry, always keeping the first and last point. */
@@ -137,26 +140,37 @@ function chunkSegments(segments: RouteSegment[], targetDistanceMeters: number): 
   const chunks: Chunk[] = [];
   let currentSlice: RouteSegment[] = [];
   let currentDistance = 0;
+  let totalDistanceSoFar = 0;
+  let rangeStart = 0;
+
+  function pushChunk() {
+    const rawPoints = chunkRoutePoints(currentSlice);
+    totalDistanceSoFar += currentDistance;
+
+    chunks.push({
+      segments: currentSlice,
+      aroundPoints: thinPoints(rawPoints, AROUND_POINT_STRIDE),
+      rawPointCount: rawPoints.length,
+      rangeStartKm: rangeStart / 1000,
+      rangeEndKm: totalDistanceSoFar / 1000,
+    });
+
+    rangeStart = totalDistanceSoFar;
+  }
 
   for (const segment of segments) {
     currentSlice.push(segment);
     currentDistance += haversineDistance(segment.start, segment.end);
 
     if (currentDistance >= targetDistanceMeters) {
-      chunks.push({
-        segments: currentSlice,
-        aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
-      });
+      pushChunk();
       currentSlice = [];
       currentDistance = 0;
     }
   }
 
   if (currentSlice.length > 0) {
-    chunks.push({
-      segments: currentSlice,
-      aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
-    });
+    pushChunk();
   }
 
   return chunks;
@@ -166,14 +180,12 @@ function logChunkStats(chunks: Chunk[]): void {
   console.log(`[mapMatching] ${chunks.length} chunk(s) for this route:`);
 
   chunks.forEach((chunk, i) => {
-    const distanceKm =
-      chunk.segments.reduce((sum, s) => sum + haversineDistance(s.start, s.end), 0) / 1000;
     const coordListLength = chunk.aroundPoints.map((p) => `${p.lat},${p.lon}`).join(",").length;
 
     console.log(
-      `[mapMatching]   chunk ${i + 1}/${chunks.length}: ${distanceKm.toFixed(1)}km, ` +
-        `${chunk.segments.length} segments, ${chunk.aroundPoints.length} around-query points ` +
-        `(~${coordListLength} chars coord list)`
+      `[mapMatching]   chunk ${i + 1}/${chunks.length}: km ${chunk.rangeStartKm.toFixed(1)}-${chunk.rangeEndKm.toFixed(1)}, ` +
+        `${chunk.segments.length} segments, ${chunk.rawPointCount} points before thinning -> ` +
+        `${chunk.aroundPoints.length} after (~${coordListLength} chars coord list)`
     );
   });
 }
@@ -189,12 +201,18 @@ interface OverpassElement {
   geometry?: OverpassGeometryNode[];
 }
 
-async function fetchWaysAround(points: LatLon[], radiusMeters: number): Promise<OsmWay[]> {
+async function fetchWaysAround(
+  points: LatLon[],
+  radiusMeters: number,
+  chunkLabel: string
+): Promise<OsmWay[]> {
   const response = await fetch("/api/overpass", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ points, radiusMeters }),
   });
+
+  console.log(`[mapMatching] ${chunkLabel}: Overpass HTTP status=${response.status}`);
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
@@ -204,12 +222,16 @@ async function fetchWaysAround(points: LatLon[], radiusMeters: number): Promise<
 
   const data: { elements: OverpassElement[] } = await response.json();
 
-  return data.elements
+  const ways = data.elements
     .filter((el) => el.type === "way" && el.geometry && el.geometry.length >= 2)
     .map((el) => ({
       id: el.id,
       nodes: el.geometry!.map((n) => ({ lat: n.lat, lon: n.lon })),
     }));
+
+  console.log(`[mapMatching] ${chunkLabel}: ${ways.length} OSM way(s) returned`);
+
+  return ways;
 }
 
 interface NearestEdge {
@@ -350,7 +372,11 @@ async function fetchAllChunkWays(
       isFirstForThisWorker = false;
 
       try {
-        results[i] = await fetchWaysAround(chunks[i].aroundPoints, AROUND_QUERY_RADIUS_METERS);
+        results[i] = await fetchWaysAround(
+          chunks[i].aroundPoints,
+          AROUND_QUERY_RADIUS_METERS,
+          `chunk ${i + 1}/${chunks.length}`
+        );
       } catch (err) {
         // One chunk failing (e.g. a transient rate-limit hit) shouldn't abort the whole route —
         // its segments just come back Unmatched, same as a chunk with no nearby OSM ways at all.
@@ -394,6 +420,10 @@ async function matchRoute(
   let previousMatchedWay: OsmWay | null = null;
 
   for (let i = 0; i < chunks.length; i++) {
+    let chunkMatched = 0;
+    let chunkAmbiguous = 0;
+    let chunkUnmatched = 0;
+
     for (const segment of chunks[i].segments) {
       const candidates = scoreCandidates(
         segment,
@@ -405,10 +435,20 @@ async function matchRoute(
 
       results.push({ start: segment.start, end: segment.end, status, wayId: way?.id ?? null });
 
+      if (status === "matched") chunkMatched++;
+      else if (status === "ambiguous") chunkAmbiguous++;
+      else chunkUnmatched++;
+
       if (status === "matched" && way) {
         previousMatchedWay = way;
       }
     }
+
+    console.log(
+      `[mapMatching] chunk ${i + 1}/${chunks.length}: ${chunkMatched} matched, ${chunkAmbiguous} ambiguous, ` +
+        `${chunkUnmatched} unmatched (of ${chunks[i].segments.length} segments, ` +
+        `${chunkWaysByIndex[i].length} candidate ways)`
+    );
   }
 
   return results;

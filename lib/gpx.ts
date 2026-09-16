@@ -1,3 +1,5 @@
+import { haversineDistance } from "@/lib/geo";
+
 export interface GpxPoint {
   lat: number;
   lon: number;
@@ -12,27 +14,8 @@ export interface GpxParseResult {
 
 export class GpxParseError extends Error {}
 
-const EARTH_RADIUS_METERS = 6371000;
-
 // Below this coverage, elevation data is treated as not reliable enough to report (v0.1 calibration parameter).
 const MIN_ELEVATION_COVERAGE = 0.9;
-
-function toRadians(deg: number): number {
-  return (deg * Math.PI) / 180;
-}
-
-function haversineDistance(a: GpxPoint, b: GpxPoint): number {
-  const dLat = toRadians(b.lat - a.lat);
-  const dLon = toRadians(b.lon - a.lon);
-  const lat1 = toRadians(a.lat);
-  const lat2 = toRadians(b.lat);
-
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-
-  return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(h));
-}
 
 export function parseGpx(xmlText: string): GpxParseResult {
   const doc = new DOMParser().parseFromString(xmlText, "application/xml");

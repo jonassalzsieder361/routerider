@@ -1,13 +1,8 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { useCallback, useRef, useState } from "react";
 import { GpxParseError, parseGpx, type GpxParseResult } from "@/lib/gpx";
-
-const RouteMap = dynamic(
-  () => import("@/components/RouteMap").then((mod) => mod.RouteMap),
-  { ssr: false }
-);
+import { RouteAnalysis } from "@/components/RouteAnalysis";
 
 type Status = "idle" | "loading" | "success" | "error";
 
@@ -127,7 +122,7 @@ export function GpxUpload() {
             </dl>
           </div>
 
-          <RouteMap points={result.points} />
+          <RouteAnalysis points={result.points} />
         </div>
       )}
     </div>

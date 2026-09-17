@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
 
+// Diagnostic only, investigating why 504s reproduce for manual testing but not for automated
+// browser testing against a long-running dev server: timestamps this route module was loaded
+// (proxy for "was this just cold-compiled by Next dev, or has it been warm for a while") and
+// when it last handled a request, so a cold/idle hit can be told apart from a warm one.
+const MODULE_LOADED_AT = Date.now();
+let lastRequestAt: number | null = null;
+
 // Public instances, acceptable for development/early testing (see docs/RouteRider Tire
 // Pressure.pdf, Section 41). Not assumed to be permanent production infrastructure. Tried in
 // order, sequentially — the mirror is only used after the primary has actually failed, never
@@ -9,10 +16,24 @@ const OVERPASS_ENDPOINTS = [
   "https://overpass.kumi.systems/api/interpreter",
 ];
 
-// One attempt per endpoint. 25s because Overpass queries can legitimately take 15-30s under
-// normal load even on a healthy server — a shorter client timeout misreports a slow-but-working
-// server as a network failure.
-const REQUEST_TIMEOUT_MS = 25000;
+// One attempt per endpoint. 45s because logs showed the public instances taking up to ~70s to
+// respond under load while still answering successfully — a shorter client timeout misreports a
+// slow-but-working server as a network failure.
+const REQUEST_TIMEOUT_MS = 45000;
+
+// Status-check-confirmed pattern: overpass-api.de (primary) is almost always healthy and fast,
+// overpass.kumi.systems (mirror) is almost always heavily overloaded — falling through to the
+// mirror on the primary's first hiccup mostly just adds a slow, likely-to-also-fail detour. A
+// same-endpoint retry on the primary catches a one-off 5xx blip without paying that cost.
+const PRIMARY_RETRY_DELAY_MS = 3000;
+
+function isRetryableServerError(status: number): boolean {
+  return status === 500 || status === 502 || status === 504;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function log(requestId: string, message: string): void {
   console.log(`[overpass ${requestId}] ${new Date().toISOString()} ${message}`);
@@ -124,15 +145,31 @@ async function queryEndpointOnce(
     throw new EndpointError(host, response.status, `HTTP ${response.status}`);
   }
 
+  let data: unknown;
+
   try {
-    const data = await response.json();
-    log(requestId, `← ${host} status=${response.status} (${durationMs}ms) OK`);
-    return data;
+    data = await response.json();
   } catch (err) {
     const info = describeError(err);
     log(requestId, `← ${host} status=${response.status} (${durationMs}ms) unparseable body: ${info.message}`);
     throw new EndpointError(host, 502, `Unparseable response: ${info.message}`);
   }
+
+  // Overpass's own [timeout:...] budget inside the query is separate from — and here, much
+  // shorter than — our client-side REQUEST_TIMEOUT_MS. When the query itself runs out of time
+  // server-side, Overpass still answers HTTP 200 with an empty `elements` array and this
+  // `remark` field, rather than a non-2xx status. Left unchecked, that reads as "genuinely no
+  // roads found here" — 0 candidate ways, every segment Unmatched, no error shown anywhere —
+  // instead of the query having silently failed to run to completion.
+  const remark = (data as { remark?: unknown } | null)?.remark;
+
+  if (typeof remark === "string" && remark.length > 0) {
+    log(requestId, `← ${host} status=${response.status} (${durationMs}ms) Overpass runtime error: "${remark}"`);
+    throw new EndpointError(host, 504, `Overpass query did not complete: ${remark}`);
+  }
+
+  log(requestId, `← ${host} status=${response.status} (${durationMs}ms) OK`);
+  return data;
 }
 
 interface AroundPoint {
@@ -154,6 +191,17 @@ function isValidPoint(p: unknown): p is AroundPoint {
 export async function POST(request: Request) {
   const requestId = Math.random().toString(36).slice(2, 8);
   const requestStart = Date.now();
+
+  // Diagnostic only, first thing in the handler (before request.json() or anything else that
+  // could itself be delayed) — see MODULE_LOADED_AT comment above.
+  const sinceModuleLoadMs = requestStart - MODULE_LOADED_AT;
+  const sinceLastRequestMs = lastRequestAt === null ? null : requestStart - lastRequestAt;
+  log(
+    requestId,
+    `handler entered: ${sinceModuleLoadMs}ms since this route module was loaded, ` +
+      `${sinceLastRequestMs === null ? "no prior request this module instance" : `${sinceLastRequestMs}ms since last request`}`
+  );
+  lastRequestAt = requestStart;
 
   const { points, radiusMeters } = await request.json();
 
@@ -186,6 +234,7 @@ export async function POST(request: Request) {
 
   for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
     const endpoint = OVERPASS_ENDPOINTS[i];
+    const isPrimary = i === 0;
 
     try {
       const data = await queryEndpointOnce(requestId, endpoint, query);
@@ -196,6 +245,25 @@ export async function POST(request: Request) {
       return NextResponse.json(data);
     } catch (err) {
       if (err instanceof EndpointError) errors.push(err);
+
+      if (isPrimary && err instanceof EndpointError && isRetryableServerError(err.status)) {
+        log(
+          requestId,
+          `${endpointHost(endpoint)} returned ${err.status}, retrying same endpoint once after ${PRIMARY_RETRY_DELAY_MS}ms`
+        );
+        await sleep(PRIMARY_RETRY_DELAY_MS);
+
+        try {
+          const data = await queryEndpointOnce(requestId, endpoint, query);
+          log(
+            requestId,
+            `request succeeded via ${endpointHost(endpoint)} (retry) after ${Date.now() - requestStart}ms total`
+          );
+          return NextResponse.json(data);
+        } catch (retryErr) {
+          if (retryErr instanceof EndpointError) errors.push(retryErr);
+        }
+      }
 
       const hasNext = i < OVERPASS_ENDPOINTS.length - 1;
       if (hasNext) {

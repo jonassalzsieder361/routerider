@@ -77,6 +77,12 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
               : "Route analysieren"}
         </button>
 
+        {status === "loading" && (
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Route wird analysiert, das kann bei langen Routen 1-2 Minuten dauern.
+          </p>
+        )}
+
         {status === "error" && error && (
           <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
         )}

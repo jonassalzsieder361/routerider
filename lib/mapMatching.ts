@@ -39,6 +39,15 @@ const SEARCH_RADIUS_METERS = 20; // within the documented 15-25 m range
 const MIN_POINT_SPACING_METERS = 20; // resample route before matching to stabilize bearing calculation
 const CHUNK_TARGET_DISTANCE_METERS = 40_000; // route length per Overpass query (target range: 30-50 km)
 
+// A chunk is also closed early once its points' bounding box grows wider or taller than this,
+// even if it hasn't reached CHUNK_TARGET_DISTANCE_METERS yet. A long, thin, mostly-straight
+// route (point-to-point rather than a loop) can rack up a huge bounding box well before the
+// distance target — the `around` query's cost to Overpass scales with the area it has to check
+// proximity against, not just the point count, and a wide-bbox chunk can blow Overpass's own
+// internal query timeout even though our request otherwise looks identical in size to a
+// same-point-count chunk from a tighter, loopier route.
+const CHUNK_BBOX_THRESHOLD_METERS = 15_000;
+
 // The `around` query is sent only for a thinned subset of each chunk's points (every Nth), to
 // keep the query small — but that opens gaps between the points we actually query around. A
 // point exactly midway between two kept points can be up to (stride * MIN_POINT_SPACING_METERS)
@@ -102,6 +111,37 @@ function buildSegments(points: LatLon[]): RouteSegment[] {
 interface Chunk {
   segments: RouteSegment[];
   aroundPoints: LatLon[];
+  bboxWidthMeters: number;
+  bboxHeightMeters: number;
+}
+
+interface BoundingBox {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+}
+
+function emptyBoundingBox(): BoundingBox {
+  return { minLat: Infinity, maxLat: -Infinity, minLon: Infinity, maxLon: -Infinity };
+}
+
+function expandBoundingBox(box: BoundingBox, point: LatLon): void {
+  if (point.lat < box.minLat) box.minLat = point.lat;
+  if (point.lat > box.maxLat) box.maxLat = point.lat;
+  if (point.lon < box.minLon) box.minLon = point.lon;
+  if (point.lon > box.maxLon) box.maxLon = point.lon;
+}
+
+/** Bounding box extent in meters — ground distance across it, not a naive degree delta. */
+function boundingBoxDimensionsMeters(box: BoundingBox): { widthMeters: number; heightMeters: number } {
+  const midLat = (box.minLat + box.maxLat) / 2;
+  const midLon = (box.minLon + box.maxLon) / 2;
+
+  return {
+    widthMeters: haversineDistance({ lat: midLat, lon: box.minLon }, { lat: midLat, lon: box.maxLon }),
+    heightMeters: haversineDistance({ lat: box.minLat, lon: midLon }, { lat: box.maxLat, lon: midLon }),
+  };
 }
 
 /** Every Nth point of the chunk's own route geometry, always keeping the first and last point. */
@@ -123,36 +163,69 @@ function chunkRoutePoints(slice: RouteSegment[]): LatLon[] {
   return points;
 }
 
+/** Diagnostic only — logs chunk sizes, bounding box extent and point-thinning stats before any Overpass calls fire. */
+function logChunkStats(chunks: Chunk[]): void {
+  console.log(`[mapMatching] ${chunks.length} chunk(s) for this route:`);
+
+  chunks.forEach((chunk, i) => {
+    const distanceKm =
+      chunk.segments.reduce((sum, s) => sum + haversineDistance(s.start, s.end), 0) / 1000;
+
+    console.log(
+      `[mapMatching]   chunk ${i + 1}/${chunks.length}: ${distanceKm.toFixed(1)}km, ` +
+        `${chunk.segments.length} segments, ${chunk.aroundPoints.length} around-query points, ` +
+        `bbox ${(chunk.bboxWidthMeters / 1000).toFixed(1)}x${(chunk.bboxHeightMeters / 1000).toFixed(1)}km`
+    );
+  });
+}
+
 /**
  * Groups consecutive segments into batches by accumulated route distance — one Overpass query
  * per ~CHUNK_TARGET_DISTANCE_METERS of route — rather than one query per point/segment or one
  * for the whole route, to stay usable on real routes with thousands of points without hitting
- * the public instance's rate limits.
+ * the public instance's rate limits. A chunk is also closed early if its bounding box exceeds
+ * CHUNK_BBOX_THRESHOLD_METERS, whichever comes first — see that constant's comment.
  */
-function chunkSegments(segments: RouteSegment[], targetDistanceMeters: number): Chunk[] {
+function chunkSegments(
+  segments: RouteSegment[],
+  targetDistanceMeters: number,
+  bboxThresholdMeters: number
+): Chunk[] {
   const chunks: Chunk[] = [];
   let currentSlice: RouteSegment[] = [];
   let currentDistance = 0;
+  let currentBox = emptyBoundingBox();
+
+  function pushChunk() {
+    const { widthMeters, heightMeters } = boundingBoxDimensionsMeters(currentBox);
+    chunks.push({
+      segments: currentSlice,
+      aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
+      bboxWidthMeters: widthMeters,
+      bboxHeightMeters: heightMeters,
+    });
+  }
 
   for (const segment of segments) {
+    if (currentSlice.length === 0) expandBoundingBox(currentBox, segment.start);
+
     currentSlice.push(segment);
     currentDistance += haversineDistance(segment.start, segment.end);
+    expandBoundingBox(currentBox, segment.end);
 
-    if (currentDistance >= targetDistanceMeters) {
-      chunks.push({
-        segments: currentSlice,
-        aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
-      });
+    const { widthMeters, heightMeters } = boundingBoxDimensionsMeters(currentBox);
+    const bboxTooLarge = widthMeters > bboxThresholdMeters || heightMeters > bboxThresholdMeters;
+
+    if (currentDistance >= targetDistanceMeters || bboxTooLarge) {
+      pushChunk();
       currentSlice = [];
       currentDistance = 0;
+      currentBox = emptyBoundingBox();
     }
   }
 
   if (currentSlice.length > 0) {
-    chunks.push({
-      segments: currentSlice,
-      aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
-    });
+    pushChunk();
   }
 
   return chunks;
@@ -169,12 +242,18 @@ interface OverpassElement {
   geometry?: OverpassGeometryNode[];
 }
 
-async function fetchWaysAround(points: LatLon[], radiusMeters: number): Promise<OsmWay[]> {
+async function fetchWaysAround(
+  points: LatLon[],
+  radiusMeters: number,
+  chunkLabel: string
+): Promise<OsmWay[]> {
   const response = await fetch("/api/overpass", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ points, radiusMeters }),
   });
+
+  console.log(`[mapMatching] ${chunkLabel}: Overpass HTTP status=${response.status}`);
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
@@ -184,12 +263,16 @@ async function fetchWaysAround(points: LatLon[], radiusMeters: number): Promise<
 
   const data: { elements: OverpassElement[] } = await response.json();
 
-  return data.elements
+  const ways = data.elements
     .filter((el) => el.type === "way" && el.geometry && el.geometry.length >= 2)
     .map((el) => ({
       id: el.id,
       nodes: el.geometry!.map((n) => ({ lat: n.lat, lon: n.lon })),
     }));
+
+  console.log(`[mapMatching] ${chunkLabel}: ${ways.length} OSM way(s) returned`);
+
+  return ways;
 }
 
 interface NearestEdge {
@@ -311,7 +394,8 @@ async function matchRoute(
 
   if (segments.length === 0) return [];
 
-  const chunks = chunkSegments(segments, CHUNK_TARGET_DISTANCE_METERS);
+  const chunks = chunkSegments(segments, CHUNK_TARGET_DISTANCE_METERS, CHUNK_BBOX_THRESHOLD_METERS);
+  logChunkStats(chunks);
 
   const results: MatchedSegment[] = [];
   let previousMatchedWay: OsmWay | null = null;
@@ -325,7 +409,16 @@ async function matchRoute(
   for (let i = 0; i < chunks.length; i++) {
     if (i > 0) await sleep(CHUNK_DELAY_MS);
 
-    const chunkWays = await fetchWaysAround(chunks[i].aroundPoints, AROUND_QUERY_RADIUS_METERS);
+    const chunkLabel = `chunk ${i + 1}/${chunks.length}`;
+    const chunkWays = await fetchWaysAround(
+      chunks[i].aroundPoints,
+      AROUND_QUERY_RADIUS_METERS,
+      chunkLabel
+    );
+
+    let chunkMatched = 0;
+    let chunkAmbiguous = 0;
+    let chunkUnmatched = 0;
 
     for (const segment of chunks[i].segments) {
       const candidates = scoreCandidates(
@@ -338,10 +431,20 @@ async function matchRoute(
 
       results.push({ start: segment.start, end: segment.end, status, wayId: way?.id ?? null });
 
+      if (status === "matched") chunkMatched++;
+      else if (status === "ambiguous") chunkAmbiguous++;
+      else chunkUnmatched++;
+
       if (status === "matched" && way) {
         previousMatchedWay = way;
       }
     }
+
+    console.log(
+      `[mapMatching] ${chunkLabel}: ${chunkMatched} matched, ${chunkAmbiguous} ambiguous, ` +
+        `${chunkUnmatched} unmatched (of ${chunks[i].segments.length} segments, ` +
+        `${chunkWays.length} candidate ways)`
+    );
 
     onProgress?.({ completedChunks: i + 1, totalChunks: chunks.length });
   }

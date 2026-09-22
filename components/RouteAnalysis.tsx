@@ -8,6 +8,11 @@ import {
   type MatchedSegment,
   type MatchProgress,
 } from "@/lib/mapMatching";
+import {
+  classifyRoute,
+  type SurfaceClass,
+  type SurfaceDistribution,
+} from "@/lib/surfaceClassification";
 
 const RouteMap = dynamic(
   () => import("@/components/RouteMap").then((mod) => mod.RouteMap),
@@ -25,6 +30,47 @@ const LEGEND: { status: MatchedSegment["status"]; label: string; color: string }
   { status: "ambiguous", label: "Mehrdeutig", color: "#f59e0b" },
   { status: "unmatched", label: "Kein Match", color: "#71717a" },
 ];
+
+const SURFACE_ORDER: SurfaceClass[] = ["paved", "gravel", "trail", "unknown"];
+
+const SURFACE_LEGEND: Record<SurfaceClass, { label: string; color: string }> = {
+  paved: { label: "Paved", color: "#334155" },
+  gravel: { label: "Gravel", color: "#ca8a04" },
+  trail: { label: "Trail", color: "#c2410c" },
+  unknown: { label: "Unknown", color: "#a1a1aa" },
+};
+
+function SurfaceDistributionBar({ distribution }: { distribution: SurfaceDistribution }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex h-3 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+        {SURFACE_ORDER.map((surfaceClass) =>
+          distribution[surfaceClass] > 0 ? (
+            <div
+              key={surfaceClass}
+              style={{
+                width: `${distribution[surfaceClass]}%`,
+                backgroundColor: SURFACE_LEGEND[surfaceClass].color,
+              }}
+              title={`${SURFACE_LEGEND[surfaceClass].label}: ${distribution[surfaceClass].toFixed(1)}%`}
+            />
+          ) : null
+        )}
+      </div>
+      <div className="flex flex-wrap gap-4 text-sm text-zinc-600 dark:text-zinc-400">
+        {SURFACE_ORDER.map((surfaceClass) => (
+          <span key={surfaceClass} className="flex items-center gap-1.5">
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: SURFACE_LEGEND[surfaceClass].color }}
+            />
+            {SURFACE_LEGEND[surfaceClass].label} — {distribution[surfaceClass].toFixed(1)}%
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function RouteAnalysis({ points }: RouteAnalysisProps) {
   const [status, setStatus] = useState<MatchStatus>("idle");
@@ -56,6 +102,8 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
         unmatched: segments.filter((s) => s.status === "unmatched").length,
       }
     : null;
+
+  const surfaceDistribution = segments ? classifyRoute(segments).distribution : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -104,6 +152,15 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
                 </span>
               ))}
             </div>
+          </div>
+        )}
+
+        {status === "done" && surfaceDistribution && (
+          <div className="flex flex-col gap-2">
+            <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              Surface-Verteilung
+            </h3>
+            <SurfaceDistributionBar distribution={surfaceDistribution} />
           </div>
         )}
       </div>

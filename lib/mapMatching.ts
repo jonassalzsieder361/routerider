@@ -17,11 +17,14 @@ export interface RouteSegment {
 export interface MatchedSegment extends RouteSegment {
   status: SegmentMatchStatus;
   wayId: number | null;
+  /** OSM tags of the matched way (surface, tracktype, highway, ...), for Phase 4 Surface Classification. Null unless status is "matched". */
+  tags: Record<string, string> | null;
 }
 
 export interface OsmWay {
   id: number;
   nodes: LatLon[];
+  tags: Record<string, string>;
 }
 
 export type MatchProgress = { completedChunks: number; totalChunks: number };
@@ -240,6 +243,7 @@ interface OverpassElement {
   type: string;
   id: number;
   geometry?: OverpassGeometryNode[];
+  tags?: Record<string, string>;
 }
 
 async function fetchWaysAround(
@@ -268,6 +272,7 @@ async function fetchWaysAround(
     .map((el) => ({
       id: el.id,
       nodes: el.geometry!.map((n) => ({ lat: n.lat, lon: n.lon })),
+      tags: el.tags ?? {},
     }));
 
   console.log(`[mapMatching] ${chunkLabel}: ${ways.length} OSM way(s) returned`);
@@ -429,7 +434,13 @@ async function matchRoute(
       );
       const { status, way } = resolveSegmentMatch(candidates);
 
-      results.push({ start: segment.start, end: segment.end, status, wayId: way?.id ?? null });
+      results.push({
+        start: segment.start,
+        end: segment.end,
+        status,
+        wayId: way?.id ?? null,
+        tags: way?.tags ?? null,
+      });
 
       if (status === "matched") chunkMatched++;
       else if (status === "ambiguous") chunkAmbiguous++;

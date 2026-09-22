@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { GpxParseError, parseGpx, type GpxParseResult } from "@/lib/gpx";
 import { RouteAnalysis } from "@/components/RouteAnalysis";
+import { BikeSetup, type BikeSetupValues } from "@/components/BikeSetup";
 
 type Status = "idle" | "loading" | "success" | "error";
 
@@ -12,6 +13,9 @@ export function GpxUpload() {
   const [result, setResult] = useState<GpxParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [surfaceAnalyzed, setSurfaceAnalyzed] = useState(false);
+  // Held for Phase 7 (Pressure Engine) — no calculation happens yet in Phase 6.
+  const [, setBikeSetup] = useState<BikeSetupValues | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = useCallback(async (file: File) => {
@@ -24,6 +28,7 @@ export function GpxUpload() {
     setStatus("loading");
     setFileName(file.name);
     setError(null);
+    setSurfaceAnalyzed(false);
 
     try {
       const text = await file.text();
@@ -122,7 +127,12 @@ export function GpxUpload() {
             </dl>
           </div>
 
-          <RouteAnalysis points={result.points} />
+          <RouteAnalysis
+            points={result.points}
+            onAnalyzed={() => setSurfaceAnalyzed(true)}
+          />
+
+          {surfaceAnalyzed && <BikeSetup onChange={setBikeSetup} />}
         </div>
       )}
     </div>

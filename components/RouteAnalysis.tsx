@@ -23,6 +23,8 @@ type MatchStatus = "idle" | "loading" | "done" | "error";
 
 interface RouteAnalysisProps {
   points: GpxPoint[];
+  /** Fired once map matching + surface classification finish successfully (Phase 6 gates on this). */
+  onAnalyzed?: () => void;
 }
 
 const LEGEND: { status: MatchedSegment["status"]; label: string; color: string }[] = [
@@ -72,7 +74,7 @@ function SurfaceDistributionBar({ distribution }: { distribution: SurfaceDistrib
   );
 }
 
-export function RouteAnalysis({ points }: RouteAnalysisProps) {
+export function RouteAnalysis({ points, onAnalyzed }: RouteAnalysisProps) {
   const [status, setStatus] = useState<MatchStatus>("idle");
   const [segments, setSegments] = useState<MatchedSegment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,6 +89,7 @@ export function RouteAnalysis({ points }: RouteAnalysisProps) {
       const result = await overpassHeuristicMatcher.matchRoute(points, setProgress);
       setSegments(result);
       setStatus("done");
+      onAnalyzed?.();
     } catch (err) {
       setStatus("error");
       setError(

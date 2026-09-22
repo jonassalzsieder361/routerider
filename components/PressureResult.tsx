@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { BikeSetupValues } from "@/components/BikeSetup";
 import { calculateFrontRearPressure } from "@/lib/pressureEngine";
 import type { SurfaceDistribution } from "@/lib/surfaceClassification";
+import { formatPressure, type PressureUnit } from "@/lib/units";
 
 interface PressureResultProps {
   bikeSetup: BikeSetupValues;
@@ -34,8 +35,41 @@ function OptionalPsiInput({ label, value, onChange }: OptionalPsiInputProps) {
   );
 }
 
+interface UnitToggleProps {
+  unit: PressureUnit;
+  onChange: (unit: PressureUnit) => void;
+}
+
+/** PSI/BAR segmented control — moss-green active state from the "Trail" design concept. */
+function UnitToggle({ unit, onChange }: UnitToggleProps) {
+  const options: { value: PressureUnit; label: string }[] = [
+    { value: "psi", label: "PSI" },
+    { value: "bar", label: "BAR" },
+  ];
+
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-full bg-zinc-100 p-1 dark:bg-zinc-800">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+            option.value === unit
+              ? "bg-[#3F6B4A] text-white"
+              : "text-zinc-500 dark:text-zinc-400"
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 interface WheelColumnProps {
   label: string;
+  unit: PressureUnit;
   psi: number;
   clamped: boolean;
   minPsi: number;
@@ -48,6 +82,7 @@ interface WheelColumnProps {
 
 function WheelColumn({
   label,
+  unit,
   psi,
   clamped,
   minPsi,
@@ -62,17 +97,20 @@ function WheelColumn({
       <span className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
         {label}
       </span>
-      <span className="text-3xl font-semibold text-zinc-900 dark:text-zinc-100">{psi} psi</span>
+      <span className="text-3xl font-semibold text-zinc-900 dark:text-zinc-100">
+        {formatPressure(psi, unit)} {unit}
+      </span>
 
       {clamped && (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          Wir haben deinen Wert auf den sicheren Bereich angepasst ({minPsi}–{maxPsi} psi).
+          Wir haben deinen Wert auf den sicheren Bereich angepasst ({formatPressure(minPsi, unit)}
+          –{formatPressure(maxPsi, unit)} {unit}).
         </p>
       )}
 
       <div className="mt-2 flex gap-3">
-        <OptionalPsiInput label="Min (Aufdruck)" value={userMinPsi} onChange={onUserMinPsiChange} />
-        <OptionalPsiInput label="Max (Aufdruck)" value={userMaxPsi} onChange={onUserMaxPsiChange} />
+        <OptionalPsiInput label="Min (Aufdruck, psi)" value={userMinPsi} onChange={onUserMinPsiChange} />
+        <OptionalPsiInput label="Max (Aufdruck, psi)" value={userMaxPsi} onChange={onUserMaxPsiChange} />
       </div>
     </div>
   );
@@ -83,6 +121,7 @@ function WheelColumn({
  * result screen is Phase 8's scope, not this one.
  */
 export function PressureResult({ bikeSetup, distribution }: PressureResultProps) {
+  const [unit, setUnit] = useState<PressureUnit>("psi");
   const [frontMinPsi, setFrontMinPsi] = useState<number | null>(null);
   const [frontMaxPsi, setFrontMaxPsi] = useState<number | null>(null);
   const [rearMinPsi, setRearMinPsi] = useState<number | null>(null);
@@ -99,13 +138,17 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
 
   return (
     <div className="flex flex-col gap-4 rounded-xl border border-zinc-200 p-6 dark:border-zinc-800">
-      <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-        Pressure (Test-Anzeige, Phase 7)
-      </h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          Pressure (Test-Anzeige, Phase 7)
+        </h2>
+        <UnitToggle unit={unit} onChange={setUnit} />
+      </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         <WheelColumn
           label="Front"
+          unit={unit}
           psi={result.front.psi}
           clamped={result.front.clamped}
           minPsi={result.front.minPsi}
@@ -117,6 +160,7 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
         />
         <WheelColumn
           label="Rear"
+          unit={unit}
           psi={result.rear.psi}
           clamped={result.rear.clamped}
           minPsi={result.rear.minPsi}

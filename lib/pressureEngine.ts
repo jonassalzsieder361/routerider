@@ -9,9 +9,10 @@ export function bertoBasePressurePsi(wheelLoadLbs: number, tireWidthMm: number):
 }
 
 // docs/RouteRider Tire Pressure.pdf, Section 21 "Terrain Modifiers".
-const PAVED_MODIFIER = 1.0;
-const GRAVEL_MODIFIER = 0.9;
-const TRAIL_MODIFIER = 0.8;
+export const SURFACE_MODIFIERS = { paved: 1.0, gravel: 0.9, trail: 0.8 } as const;
+const PAVED_MODIFIER = SURFACE_MODIFIERS.paved;
+const GRAVEL_MODIFIER = SURFACE_MODIFIERS.gravel;
+const TRAIL_MODIFIER = SURFACE_MODIFIERS.trail;
 
 /**
  * Distance-weighted terrain modifier (Section 22). Per Section 15 "Unknown Surface Handling"

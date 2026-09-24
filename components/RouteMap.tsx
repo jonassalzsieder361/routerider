@@ -32,7 +32,9 @@ export function RouteMap({ points, matchedSegments }: RouteMapProps) {
   const bounds: LatLngBoundsExpression = positions;
 
   return (
-    <div className="h-80 w-full overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
+    // Shorter on phones so there's always page area outside the map to scroll with — one-finger
+    // drags that start on the map pan it (Leaflet), drags elsewhere scroll the page.
+    <div className="h-60 w-full overflow-hidden sm:h-80 rounded-xl border border-zinc-200 dark:border-zinc-800">
       <MapContainer
         center={positions[0]}
         zoom={13}

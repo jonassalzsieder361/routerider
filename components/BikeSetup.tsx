@@ -76,7 +76,7 @@ function NumberField({ label, unit, value, min, max, step, onCommit }: NumberFie
   return (
     <label className="flex flex-col gap-1.5">
       <span className="text-[13px] font-medium text-[#1A1A1A]">{label}</span>
-      <div className="flex items-center gap-2 rounded-xl border border-[#E3E0D8] bg-white px-3 py-2">
+      <div className="flex items-center gap-2 rounded-xl border border-[#E3E0D8] bg-white px-3">
         <input
           type="number"
           inputMode="decimal"
@@ -89,7 +89,7 @@ function NumberField({ label, unit, value, min, max, step, onCommit }: NumberFie
           onKeyDown={(e) => {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
-          className="w-full min-w-0 bg-transparent text-[15px] text-[#1A1A1A] outline-none"
+          className="h-11 w-full min-w-0 bg-transparent text-[15px] text-[#1A1A1A] outline-none"
         />
         <span className="shrink-0 text-[12px] text-[#8A857C]">{unit}</span>
       </div>
@@ -114,7 +114,8 @@ function SegmentedToggle<T extends string>({ options, value, onChange }: Segment
           key={option.value}
           type="button"
           onClick={() => onChange(option.value)}
-          className={`rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition-colors ${
+          // Invisible ::before extends the tap area to >=44px tall without changing the pill's look.
+          className={`relative rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition-colors before:absolute before:inset-x-0 before:-inset-y-2 ${
             option.value === value ? "bg-[#3F6B4A] text-white" : "text-[#6B6660]"
           }`}
         >
@@ -175,7 +176,7 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
   return (
     <div
       style={{ fontFamily: "var(--font-work-sans)" }}
-      className="flex flex-col gap-6 rounded-2xl border border-[#EDEAE2] bg-[#FAF9F6] p-6 text-[#1A1A1A]"
+      className="flex flex-col gap-6 rounded-2xl border border-[#EDEAE2] bg-[#FAF9F6] p-4 text-[#1A1A1A] sm:p-6"
     >
       <div className="flex flex-col gap-1">
         <h2 className="text-[17px] font-semibold">Bike setup</h2>
@@ -270,7 +271,7 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
                 key={type}
                 type="button"
                 onClick={() => selectPreset(type)}
-                className={`flex flex-col items-start gap-1 rounded-xl border px-4 py-3 text-left transition-colors ${
+                className={`flex min-h-11 flex-col items-start gap-1 rounded-xl border px-4 py-3 text-left transition-colors ${
                   selected
                     ? "border-[#3F6B4A] bg-[#EAF1EC]"
                     : "border-[#EDEAE2] bg-white"
@@ -303,7 +304,8 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
             step={FRONT_PERCENT_BOUNDS.step}
             value={frontWeightPercent}
             onChange={(e) => setFrontWeightPercent(Number(e.target.value))}
-            className="w-full accent-[#3F6B4A]"
+            // h-11 gives the thumb a 44px-tall touch strip; the native track stays centered in it.
+            className="h-11 w-full cursor-pointer accent-[#3F6B4A]"
           />
           <p className="text-[11px] text-[#9A9488]">
             Suggested starting point. Adjust if most of your luggage is carried on the front or

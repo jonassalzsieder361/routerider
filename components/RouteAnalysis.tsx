@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GpxPoint } from "@/lib/gpx";
 import {
   overpassHeuristicMatcher,
@@ -59,7 +59,7 @@ function SurfaceDistributionBar({ distribution }: { distribution: SurfaceDistrib
           ) : null
         )}
       </div>
-      <div className="flex flex-wrap gap-4 text-sm text-zinc-600 dark:text-zinc-400">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-600 dark:text-zinc-400">
         {SURFACE_ORDER.map((surfaceClass) => (
           <span key={surfaceClass} className="flex items-center gap-1.5">
             <span
@@ -70,6 +70,49 @@ function SurfaceDistributionBar({ distribution }: { distribution: SurfaceDistrib
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Overpass chunks can take a while on mobile connections, and progress only arrives after each
+ * chunk finishes — so the bar pulses before the first chunk and a seconds counter keeps ticking,
+ * making it visible that the request is still alive rather than hung.
+ */
+function AnalysisProgress({ progress }: { progress: MatchProgress | null }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    const startedAt = Date.now();
+    const id = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const percent = progress ? (progress.completedChunks / progress.totalChunks) * 100 : 0;
+
+  return (
+    <div role="status" className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
+      <div className="flex items-baseline justify-between gap-3 text-sm">
+        <span className="font-medium text-zinc-900 dark:text-zinc-100">
+          {progress
+            ? `Abschnitt ${progress.completedChunks} von ${progress.totalChunks} geladen`
+            : "Wegenetz wird geladen…"}
+        </span>
+        <span className="shrink-0 tabular-nums text-zinc-500 dark:text-zinc-400">
+          {elapsedSeconds} s
+        </span>
+      </div>
+      <div className="relative h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+        <div
+          className="h-full rounded-full bg-zinc-900 transition-[width] duration-500 dark:bg-zinc-100"
+          style={{ width: `${percent}%` }}
+        />
+        <div className="absolute inset-0 animate-pulse bg-zinc-900/15 dark:bg-zinc-100/15" />
+      </div>
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        Das kann bei langen Routen oder mobiler Verbindung 1–2 Minuten dauern. Die Analyse läuft
+        weiter, solange die Sekunden zählen.
+      </p>
     </div>
   );
 }
@@ -117,22 +160,16 @@ export function RouteAnalysis({ points, onAnalyzed }: RouteAnalysisProps) {
           type="button"
           onClick={handleAnalyze}
           disabled={status === "loading"}
-          className="self-start rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          className="min-h-11 w-full rounded-full bg-zinc-900 px-5 py-2.5 text-sm sm:w-auto sm:self-start font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
         >
           {status === "loading"
-            ? progress
-              ? `Abschnitt ${progress.completedChunks} von ${progress.totalChunks} wird geladen…`
-              : "Route wird analysiert…"
+            ? "Route wird analysiert…"
             : status === "error"
               ? "Erneut versuchen"
               : "Route analysieren"}
         </button>
 
-        {status === "loading" && (
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            Route wird analysiert, das kann bei langen Routen 1-2 Minuten dauern.
-          </p>
-        )}
+        {status === "loading" && <AnalysisProgress progress={progress} />}
 
         {status === "error" && error && (
           <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
@@ -144,7 +181,7 @@ export function RouteAnalysis({ points, onAnalyzed }: RouteAnalysisProps) {
               {counts.matched} Segmente gematcht, {counts.ambiguous} mehrdeutig,{" "}
               {counts.unmatched} ohne Match.
             </p>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
               {LEGEND.map((item) => (
                 <span key={item.status} className="flex items-center gap-1.5">
                   <span

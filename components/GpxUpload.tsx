@@ -78,16 +78,24 @@ export function GpxUpload() {
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") inputRef.current?.click();
         }}
-        className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-16 text-center cursor-pointer transition-colors ${
+        aria-label="GPX-Datei auswählen"
+        className={`flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-4 py-10 text-center cursor-pointer transition-colors sm:px-6 sm:py-16 ${
           isDragging
             ? "border-zinc-900 bg-zinc-100 dark:border-zinc-100 dark:bg-zinc-900"
             : "border-zinc-300 dark:border-zinc-700"
         }`}
       >
         <p className="text-base font-medium text-zinc-900 dark:text-zinc-100">
-          GPX-Datei hierher ziehen oder klicken zum Auswählen
+          GPX-Route hochladen
         </p>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">.gpx</p>
+        {/* A real-looking button: on touch devices drag & drop doesn't exist, so the tap target
+            has to read as "pick a file" and opens the native file picker via the hidden input. */}
+        <span className="inline-flex min-h-11 items-center rounded-full bg-zinc-900 px-5 text-sm font-medium text-white dark:bg-zinc-100 dark:text-zinc-900">
+          Datei auswählen
+        </span>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          .gpx<span className="pointer-coarse:hidden"> · oder Datei hierher ziehen</span>
+        </p>
         <input
           ref={inputRef}
           type="file"
@@ -98,7 +106,7 @@ export function GpxUpload() {
       </div>
 
       {status === "loading" && (
-        <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">
+        <p className="mt-4 text-sm break-words text-zinc-500 dark:text-zinc-400">
           Verarbeite {fileName}…
         </p>
       )}
@@ -109,8 +117,8 @@ export function GpxUpload() {
 
       {status === "success" && result && (
         <div className="mt-6 flex flex-col gap-4">
-          <div className="rounded-xl border border-zinc-200 p-6 dark:border-zinc-800">
-            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          <div className="rounded-xl border border-zinc-200 p-4 sm:p-6 dark:border-zinc-800">
+            <p className="text-sm font-medium break-words text-zinc-900 dark:text-zinc-100">
               {fileName}
             </p>
             <dl className="mt-3 grid grid-cols-2 gap-4 text-sm">

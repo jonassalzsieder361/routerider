@@ -24,3 +24,12 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Leaflet's touch zoom buttons are 30px — too small to hit reliably on a phone (44px minimum).
+   Extra .leaflet-container keeps this ahead of leaflet.css, which loads later with the map. */
+.leaflet-container.leaflet-touch .leaflet-bar a {
+  width: 44px;
+  height: 44px;
+  line-height: 44px;
+  font-size: 22px;
+}

@@ -63,7 +63,8 @@ function UnitToggle({ unit, onChange }: UnitToggleProps) {
           type="button"
           aria-pressed={option.value === unit}
           onClick={() => onChange(option.value)}
-          className={`rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors ${
+          // Invisible ::before extends the tap area to >=44px tall without changing the pill's look.
+          className={`relative rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors before:absolute before:inset-x-0 before:-inset-y-2 ${
             option.value === unit ? "bg-[#3F6B4A] text-white" : "text-[#6B6660]"
           }`}
         >
@@ -140,7 +141,7 @@ function OptionalPsiInput({ label, value, onChange }: OptionalPsiInputProps) {
           const raw = e.target.value;
           onChange(raw === "" ? null : Number(raw));
         }}
-        className="w-full rounded-xl border border-[#E3E0D8] bg-white px-3 py-1.5 text-[13px] text-[#1A1A1A] outline-none focus:border-[#3F6B4A]"
+        className="min-h-11 w-full rounded-xl border border-[#E3E0D8] bg-white px-3 py-1.5 text-[13px] text-[#1A1A1A] outline-none focus:border-[#3F6B4A]"
       />
     </label>
   );
@@ -148,7 +149,7 @@ function OptionalPsiInput({ label, value, onChange }: OptionalPsiInputProps) {
 
 function Step({ index, title, children }: { index: number; title: string; children: React.ReactNode }) {
   return (
-    <div className="flex gap-3">
+    <div className="flex gap-2.5 sm:gap-3">
       <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#EAF1EC] text-[11px] font-semibold text-[#3F6B4A]">
         {index}
       </span>
@@ -165,15 +166,18 @@ function Step({ index, title, children }: { index: number; title: string; childr
 /** Front | Rear row inside the explanation steps, so both wheels are always read side by side. */
 function WheelRow({ label, front, rear }: { label: string; front: string; rear: string }) {
   return (
-    <div className="grid grid-cols-[1fr_auto_auto] gap-x-4 tabular-nums">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 tabular-nums">
       <span>{label}</span>
-      <span className="text-right">
-        <span className="text-[#9A9488]">F </span>
-        <span className="text-[#1A1A1A]">{front}</span>
-      </span>
-      <span className="text-right">
-        <span className="text-[#9A9488]">R </span>
-        <span className="text-[#1A1A1A]">{rear}</span>
+      {/* ml-auto keeps the values right-aligned when they wrap below the label on narrow phones. */}
+      <span className="ml-auto flex gap-x-4 whitespace-nowrap">
+        <span>
+          <span className="text-[#9A9488]">F </span>
+          <span className="text-[#1A1A1A]">{front}</span>
+        </span>
+        <span>
+          <span className="text-[#9A9488]">R </span>
+          <span className="text-[#1A1A1A]">{rear}</span>
+        </span>
       </span>
     </div>
   );
@@ -216,17 +220,17 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
   return (
     <div
       style={{ fontFamily: "var(--font-work-sans)" }}
-      className="flex flex-col gap-5 rounded-2xl border border-[#EDEAE2] bg-[#FAF9F6] p-6 text-[#1A1A1A]"
+      className="flex flex-col gap-5 rounded-2xl border border-[#EDEAE2] bg-[#FAF9F6] p-4 text-[#1A1A1A] sm:p-6"
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
           <h2 className="text-[17px] font-semibold">Empfohlener Reifendruck</h2>
-          <p className="text-[13px] text-[#6B6660]">
-            Optimiert für dein {tireWidthLabel} {tireTypeLabel}-Setup und den Surface-Mix dieser
-            Route.
-          </p>
+          <UnitToggle unit={unit} onChange={setUnit} />
         </div>
-        <UnitToggle unit={unit} onChange={setUnit} />
+        <p className="text-[13px] text-[#6B6660]">
+          Optimiert für dein {tireWidthLabel} {tireTypeLabel}-Setup und den Surface-Mix dieser
+          Route.
+        </p>
       </div>
 
       <div className="flex gap-3">
@@ -236,8 +240,8 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
 
       <TerrainMixBar distribution={distribution} />
 
-      <details className="group rounded-[14px] border border-[#EDEAE2] bg-white px-4 py-3.5">
-        <summary className="flex cursor-pointer list-none flex-col gap-2 [&::-webkit-details-marker]:hidden">
+      <details className="group rounded-[14px] border border-[#EDEAE2] bg-white px-3 sm:px-4">
+        <summary className="flex min-h-11 cursor-pointer list-none flex-col justify-center gap-2 py-3.5 [&::-webkit-details-marker]:hidden">
           <span className="flex items-center justify-between gap-3">
             <span className="text-[13.5px] font-semibold">Warum dieser Druck?</span>
           <svg
@@ -262,7 +266,7 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
           </span>
         </summary>
 
-        <div className="mt-4 flex flex-col gap-5 border-t border-[#EDEAE2] pt-4">
+        <div className="flex flex-col gap-5 border-t border-[#EDEAE2] pt-4 pb-4">
           <Step index={1} title="Dein Setup">
             <div className="flex justify-between gap-4 tabular-nums">
               <span>Systemgewicht</span>
@@ -304,7 +308,7 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
           <Step index={3} title={`Terrain-Modifier × ${result.terrainModifier.toFixed(2)}`}>
             <div className="flex flex-col gap-0.5 tabular-nums">
               {SURFACE_ROWS.map((row) => (
-                <div key={row.key} className="grid grid-cols-[1fr_auto_auto] gap-x-4">
+                <div key={row.key} className="grid grid-cols-[1fr_auto_auto] gap-x-3 sm:gap-x-4">
                   <span>{row.label}</span>
                   <span className="text-right text-[#1A1A1A]">
                     {distribution[row.key].toFixed(1)}%

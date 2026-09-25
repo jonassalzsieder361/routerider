@@ -124,14 +124,20 @@ Kernidee: Query-Auflösung ≠ Matching-Auflösung — die Overpass-Anfrage beko
 
 **Commit-Reihenfolge (bewusst getrennt, damit sich Probleme leicht isolieren/zurückrollen lassen):**
 1. `D8` (Wheel Diameter Modifier, siehe unten bei Phase 6/7). ✅ erledigt (2026-09-25)
-2. `Overpass 429 retry + exact query cache` — gegen die bestehende Chunking-Logik getestet (Chunk-Anzahl ändert sich hier noch nicht). ⏳ in Arbeit (2026-09-25)
-3. `Adaptive route simplification + ~50km chunking` (Douglas-Peucker + neues Chunking + 40m-Korridor + Tag-Filter) — danach die Chunk-Reduktion sichtbar. ⏳ offen
+2. `Overpass 429 retry + exact query cache` — gegen die bestehende Chunking-Logik getestet (Chunk-Anzahl ändert sich hier noch nicht). ✅ erledigt (2026-09-25) — Cache verifiziert (zweiter Durchlauf 13ms statt 13,4s), 429-Backoff am selben Tag mehrfach live bestätigt.
+3. `Adaptive route simplification + ~50km chunking` (Douglas-Peucker + neues Chunking + 40m-Korridor + Tag-Filter) — danach die Chunk-Reduktion sichtbar. ✅ committed (2026-09-25), Regression nach der letzten Änderung (sofortiges Halbieren bei remark) steht noch aus, siehe unten.
+
+*Testergebnisse Commit 3 (2026-09-25, vor der remark-Änderung; Match-Logik und Query seitdem unverändert):* 9,5km → 1 Chunk, 162 gematcht / 53 mehrdeutig / 0 ohne Match. 57,4km Grunewald → 2 Chunks à 28,5km, beide per remark-Timeout halbiert, 832 / 176 (17,5%) / 0 ohne Match (vorher 826 / 177 / 5 bei denselben 1008 Segmenten). Offline-Prüfung aller Testrouten: jedes Segment genau einmal abgedeckt, max. 11,9m Abstand zur Query-Linie, 192,8km → 4 statt 9 Chunks.
+
+- **Adaptive chunking:** Routes are initially split into chunks of approximately 50 km. If Overpass returns a query-timeout remark, the affected chunk is immediately divided into smaller chunks without retrying the same oversized query on another endpoint. (Beobachtet: in der Berliner Innenstadt überschreiten schon ~28km-Chunks Overpass' 25s-Limit — 50km ist eine Obergrenze, keine Garantie.)
+- **Regression nach remark-Änderung offen:** die Wiederholung von 9,5km + Grunewald nach dem Umbau auf sofortiges Halbieren scheiterte am 2026-09-25 (15:47–16:23 UTC) durchgehend an HTTP 504 von overpass-api.de (Serverlast, eigene IP laut /api/status nicht gedrosselt). Bei ruhigem Server nachholen, Erwartung: 0 ohne Match.
 
 **Testrouten für Commit 3:** kurz (9,5km — Präzision darf nicht schlechter werden), mittel (57,4km Grunewald/Berlin — Chunk-Grenzen-Verhalten), lang (192,8km "Wochenende 2" — deutliche Request-Reduktion, sollte bei ~50km-Chunks ca. 4 statt bisher 9 Chunks brauchen; das ist zugleich der bisher offene >150km-Randfall unten, den wir damit möglicherweise mit auflösen).
 
 **Hinweis zum Testen von Commit 2:** der 429-Backoff-Pfad lässt sich nicht zuverlässig auf Kommando auslösen — beim STOP→Test hier auf die Cache-Verifikation konzentrieren (dieselbe Route innerhalb derselben Browser-Session zweimal hochladen, zweiter Durchlauf sollte spürbar schneller sein/keine neuen Overpass-Requests erzeugen). Der 429-Pfad wird nur bei Gelegenheit real bestätigt.
 
 - **Offener Punkt:** sehr lange Mehrtages-Routen (getestet: 192,8 km) sind noch nicht zuverlässig bestätigt — wird mit Commit 3 oben erneut getestet und möglicherweise aufgelöst. Bei Bedarf später eigene Overpass-Instanz oder bezahlten Anbieter evaluieren.
+- **Long-route validation:** The 192.8 km test route could not yet be validated end-to-end due to repeated HTTP 504 and client-side timeouts during high Overpass server load. Chunking behavior and long-route reliability require an additional test under normal server conditions.
 
 **Phase 4 — OSM Surface Analysis**: Klassifizierung Paved/Gravel/Trail/Unknown (Section 11) + Inference-Regeltabelle aus D7. ✅ erledigt — von Jonas als gut funktionierend bestätigt.
 

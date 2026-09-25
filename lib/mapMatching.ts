@@ -40,31 +40,40 @@ export interface MapMatcher {
 // Adjustable, not fixed truths — kept centralized here, matching the pattern used for terrain modifiers.
 const SEARCH_RADIUS_METERS = 20; // within the documented 15-25 m range
 const MIN_POINT_SPACING_METERS = 20; // resample route before matching to stabilize bearing calculation
-const CHUNK_TARGET_DISTANCE_METERS = 40_000; // route length per Overpass query (target range: 30-50 km)
 
-// A chunk is also closed early once its points' bounding box grows wider or taller than this,
-// even if it hasn't reached CHUNK_TARGET_DISTANCE_METERS yet. A long, thin, mostly-straight
-// route (point-to-point rather than a loop) can rack up a huge bounding box well before the
-// distance target — the `around` query's cost to Overpass scales with the area it has to check
-// proximity against, not just the point count, and a wide-bbox chunk can blow Overpass's own
-// internal query timeout even though our request otherwise looks identical in size to a
-// same-point-count chunk from a tighter, loopier route.
-const CHUNK_BBOX_THRESHOLD_METERS = 15_000;
+// Query resolution is deliberately separate from matching resolution (docs/RouteRider - Build
+// Guide v0.1.md, Phase 3, "Finale v0.1-Spezifikation für den Overpass-Umbau"): Overpass gets a
+// Douglas-Peucker-simplified line, while matching still scores every resampled segment of the
+// full route. The simplification only picks a subset of the resampled points by index, so it
+// can't alter or overwrite the points used for matching.
+const SIMPLIFY_TOLERANCE_METERS = 12;
 
-// The `around` query is sent only for a thinned subset of each chunk's points (every Nth), to
-// keep the query small — but that opens gaps between the points we actually query around. A
-// point exactly midway between two kept points can be up to (stride * MIN_POINT_SPACING_METERS)
-// / 2 away from the nearest kept point, so the query radius is widened by that amount to
-// guarantee we still fetch every way within SEARCH_RADIUS_METERS of the *original* dense route —
-// scoreCandidates still clamps to SEARCH_RADIUS_METERS afterwards, so this only affects which
-// ways are fetched as candidates, never the actual match distance.
-const AROUND_POINT_STRIDE = 8; // within the suggested every-5th-to-10th-point range
-const AROUND_QUERY_RADIUS_METERS =
-  SEARCH_RADIUS_METERS + (AROUND_POINT_STRIDE * MIN_POINT_SPACING_METERS) / 2;
+// Corridor for the Overpass `around` filter only — never the match distance, which stays at
+// SEARCH_RADIUS_METERS. Overpass treats a multi-coordinate `around` as a polyline, and the
+// simplified line is at most SIMPLIFY_TOLERANCE_METERS off the full route, so this covers every
+// way within the matching radius: 20 m matching + 12 m simplification + 8 m margin. If fetching
+// proves too tight, raise this (to 50 m first) — not the matching radius.
+const QUERY_CORRIDOR_METERS = 40;
+
+// Route length per Overpass query. The route is split into equal parts no longer than this
+// (e.g. 57 km → 2 × 28.7 km rather than 50 + 7), so no chunk is needlessly heavy.
+const CHUNK_MAX_DISTANCE_METERS = 50_000;
+
+// Each chunk's query line reaches this far into its neighbours, so ways right at a chunk
+// boundary are fetched for both sides. Only the query overlaps — every segment is still matched
+// exactly once, by exactly one chunk.
+const CHUNK_OVERLAP_METERS = 1_000;
+
+// Safety net: when a chunk still fails with Overpass's own query timeout (the `remark` case, see
+// app/api/overpass/route.ts), just that chunk is halved and retried — at most this many times in
+// a row (down to a quarter of the original length) — instead of re-chunking the whole route.
+const MAX_CHUNK_SPLIT_DEPTH = 2;
 
 // Spacing between chunk requests, on top of the retry/backoff in app/api/overpass/route.ts —
 // the public Overpass instance starts returning 429/504 after just a couple of rapid requests.
-const CHUNK_DELAY_MS = 600;
+// A general fair-use courtesy: Overpass limits concurrent slots per IP and adds a load-dependent
+// cool-down after each request.
+const CHUNK_DELAY_MS = 2500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -111,127 +120,155 @@ function buildSegments(points: LatLon[]): RouteSegment[] {
   return segments;
 }
 
-interface Chunk {
-  segments: RouteSegment[];
-  aroundPoints: LatLon[];
-  bboxWidthMeters: number;
-  bboxHeightMeters: number;
-}
-
-interface BoundingBox {
-  minLat: number;
-  maxLat: number;
-  minLon: number;
-  maxLon: number;
-}
-
-function emptyBoundingBox(): BoundingBox {
-  return { minLat: Infinity, maxLat: -Infinity, minLon: Infinity, maxLon: -Infinity };
-}
-
-function expandBoundingBox(box: BoundingBox, point: LatLon): void {
-  if (point.lat < box.minLat) box.minLat = point.lat;
-  if (point.lat > box.maxLat) box.maxLat = point.lat;
-  if (point.lon < box.minLon) box.minLon = point.lon;
-  if (point.lon > box.maxLon) box.maxLon = point.lon;
-}
-
-/** Bounding box extent in meters — ground distance across it, not a naive degree delta. */
-function boundingBoxDimensionsMeters(box: BoundingBox): { widthMeters: number; heightMeters: number } {
-  const midLat = (box.minLat + box.maxLat) / 2;
-  const midLon = (box.minLon + box.maxLon) / 2;
-
-  return {
-    widthMeters: haversineDistance({ lat: midLat, lon: box.minLon }, { lat: midLat, lon: box.maxLon }),
-    heightMeters: haversineDistance({ lat: box.minLat, lon: midLon }, { lat: box.maxLat, lon: midLon }),
-  };
-}
-
-/** Every Nth point of the chunk's own route geometry, always keeping the first and last point. */
-function thinPoints(points: LatLon[], stride: number): LatLon[] {
-  if (points.length <= 2) return points;
-
-  const thinned: LatLon[] = [];
-  for (let i = 0; i < points.length; i += stride) thinned.push(points[i]);
-
-  const last = points[points.length - 1];
-  if (thinned[thinned.length - 1] !== last) thinned.push(last);
-
-  return thinned;
-}
-
-function chunkRoutePoints(slice: RouteSegment[]): LatLon[] {
-  const points = [slice[0].start];
-  for (const segment of slice) points.push(segment.end);
-  return points;
-}
-
-/** Diagnostic only — logs chunk sizes, bounding box extent and point-thinning stats before any Overpass calls fire. */
-function logChunkStats(chunks: Chunk[]): void {
-  console.log(`[mapMatching] ${chunks.length} chunk(s) for this route:`);
-
-  chunks.forEach((chunk, i) => {
-    const distanceKm =
-      chunk.segments.reduce((sum, s) => sum + haversineDistance(s.start, s.end), 0) / 1000;
-
-    console.log(
-      `[mapMatching]   chunk ${i + 1}/${chunks.length}: ${distanceKm.toFixed(1)}km, ` +
-        `${chunk.segments.length} segments, ${chunk.aroundPoints.length} around-query points, ` +
-        `bbox ${(chunk.bboxWidthMeters / 1000).toFixed(1)}x${(chunk.bboxHeightMeters / 1000).toFixed(1)}km`
-    );
-  });
+/** Distance along the route from the first point to each point, in meters. */
+function cumulativeDistances(points: LatLon[]): number[] {
+  const cumulative = [0];
+  for (let i = 1; i < points.length; i++) {
+    cumulative.push(cumulative[i - 1] + haversineDistance(points[i - 1], points[i]));
+  }
+  return cumulative;
 }
 
 /**
- * Groups consecutive segments into batches by accumulated route distance — one Overpass query
- * per ~CHUNK_TARGET_DISTANCE_METERS of route — rather than one query per point/segment or one
- * for the whole route, to stay usable on real routes with thousands of points without hitting
- * the public instance's rate limits. A chunk is also closed early if its bounding box exceeds
- * CHUNK_BBOX_THRESHOLD_METERS, whichever comes first — see that constant's comment.
+ * Douglas-Peucker simplification. Returns the *indices* of the kept points (ascending, always
+ * including first and last) rather than a new point array — the caller's points stay the single
+ * source of truth. Iterative instead of recursive so long routes can't overflow the stack.
  */
-function chunkSegments(
-  segments: RouteSegment[],
-  targetDistanceMeters: number,
-  bboxThresholdMeters: number
-): Chunk[] {
-  const chunks: Chunk[] = [];
-  let currentSlice: RouteSegment[] = [];
-  let currentDistance = 0;
-  let currentBox = emptyBoundingBox();
+function douglasPeuckerIndices(points: LatLon[], toleranceMeters: number): number[] {
+  if (points.length <= 2) return points.map((_, i) => i);
 
-  function pushChunk() {
-    const { widthMeters, heightMeters } = boundingBoxDimensionsMeters(currentBox);
-    chunks.push({
-      segments: currentSlice,
-      aroundPoints: thinPoints(chunkRoutePoints(currentSlice), AROUND_POINT_STRIDE),
-      bboxWidthMeters: widthMeters,
-      bboxHeightMeters: heightMeters,
-    });
-  }
+  const keep = new Array<boolean>(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
 
-  for (const segment of segments) {
-    if (currentSlice.length === 0) expandBoundingBox(currentBox, segment.start);
+  const stack: [number, number][] = [[0, points.length - 1]];
 
-    currentSlice.push(segment);
-    currentDistance += haversineDistance(segment.start, segment.end);
-    expandBoundingBox(currentBox, segment.end);
+  while (stack.length > 0) {
+    const [first, last] = stack.pop()!;
+    let maxDistance = -1;
+    let maxIndex = -1;
 
-    const { widthMeters, heightMeters } = boundingBoxDimensionsMeters(currentBox);
-    const bboxTooLarge = widthMeters > bboxThresholdMeters || heightMeters > bboxThresholdMeters;
+    for (let i = first + 1; i < last; i++) {
+      const d = distancePointToSegmentMeters(points[i], points[first], points[last]);
+      if (d > maxDistance) {
+        maxDistance = d;
+        maxIndex = i;
+      }
+    }
 
-    if (currentDistance >= targetDistanceMeters || bboxTooLarge) {
-      pushChunk();
-      currentSlice = [];
-      currentDistance = 0;
-      currentBox = emptyBoundingBox();
+    if (maxIndex !== -1 && maxDistance > toleranceMeters) {
+      keep[maxIndex] = true;
+      stack.push([first, maxIndex], [maxIndex, last]);
     }
   }
 
-  if (currentSlice.length > 0) {
-    pushChunk();
+  const indices: number[] = [];
+  keep.forEach((kept, i) => {
+    if (kept) indices.push(i);
+  });
+  return indices;
+}
+
+/** The two separate views of one route: full resolution for matching, simplified for Overpass. */
+interface RouteGeometry {
+  /** Resampled route points — the only points segments are built from and matched against. */
+  matchPoints: LatLon[];
+  /** segments[i] connects matchPoints[i] and matchPoints[i + 1]. */
+  segments: RouteSegment[];
+  cumulative: number[];
+  /** Indices into matchPoints kept by Douglas-Peucker — used only to build Overpass queries. */
+  queryIndices: number[];
+}
+
+/** Range of matchPoints covered by a chunk; its segments are startIndex..endIndex-1. */
+interface Chunk {
+  startIndex: number;
+  endIndex: number;
+  /** How often this chunk has already been halved after an Overpass query timeout. */
+  splitDepth: number;
+}
+
+/**
+ * Splits the route into equal parts of at most maxDistanceMeters. Consecutive chunks share
+ * their boundary point but no segment, so every segment is matched exactly once.
+ */
+function chunkByDistance(cumulative: number[], maxDistanceMeters: number): Chunk[] {
+  const lastIndex = cumulative.length - 1;
+  const total = cumulative[lastIndex];
+  const chunkCount = Math.max(1, Math.ceil(total / maxDistanceMeters));
+  const chunkLength = total / chunkCount;
+
+  const chunks: Chunk[] = [];
+  let startIndex = 0;
+
+  for (let c = 1; c <= chunkCount && startIndex < lastIndex; c++) {
+    let endIndex = lastIndex;
+    if (c < chunkCount) {
+      endIndex = startIndex + 1;
+      while (endIndex < lastIndex && cumulative[endIndex] < c * chunkLength) endIndex++;
+    }
+    chunks.push({ startIndex, endIndex, splitDepth: 0 });
+    startIndex = endIndex;
   }
 
   return chunks;
+}
+
+/** Halves a chunk at its distance midpoint; null if it is a single segment and can't split. */
+function splitChunk(chunk: Chunk, cumulative: number[]): [Chunk, Chunk] | null {
+  if (chunk.endIndex - chunk.startIndex < 2) return null;
+
+  const target = (cumulative[chunk.startIndex] + cumulative[chunk.endIndex]) / 2;
+  let mid = chunk.startIndex + 1;
+  while (mid < chunk.endIndex - 1 && cumulative[mid] < target) mid++;
+
+  const splitDepth = chunk.splitDepth + 1;
+  return [
+    { startIndex: chunk.startIndex, endIndex: mid, splitDepth },
+    { startIndex: mid, endIndex: chunk.endIndex, splitDepth },
+  ];
+}
+
+/**
+ * The simplified query line for one chunk: every Douglas-Peucker point within the chunk plus
+ * CHUNK_OVERLAP_METERS on each side, extended by one more kept point at each end so the line
+ * fully spans that window (kept points can be far apart on long straight stretches).
+ */
+function chunkQueryPoints(chunk: Chunk, geometry: RouteGeometry): LatLon[] {
+  const { cumulative, queryIndices, matchPoints } = geometry;
+  const windowStart = cumulative[chunk.startIndex] - CHUNK_OVERLAP_METERS;
+  const windowEnd = cumulative[chunk.endIndex] + CHUNK_OVERLAP_METERS;
+
+  let first = queryIndices.findIndex((idx) => cumulative[idx] >= windowStart);
+  if (first === -1) first = queryIndices.length - 1;
+  first = Math.max(0, first - 1);
+
+  let last = first;
+  while (last < queryIndices.length - 1 && cumulative[queryIndices[last]] <= windowEnd) last++;
+
+  return queryIndices.slice(first, last + 1).map((idx) => matchPoints[idx]);
+}
+
+function chunkDistanceKm(chunk: Chunk, cumulative: number[]): string {
+  return ((cumulative[chunk.endIndex] - cumulative[chunk.startIndex]) / 1000).toFixed(1);
+}
+
+/** Diagnostic only — logs the chunk plan before any Overpass calls fire. */
+function logChunkStats(chunks: Chunk[], geometry: RouteGeometry): void {
+  const totalKm = (geometry.cumulative[geometry.cumulative.length - 1] / 1000).toFixed(1);
+  console.log(
+    `[mapMatching] ${totalKm}km route: ${geometry.matchPoints.length} match points, ` +
+      `${geometry.queryIndices.length} query points after Douglas-Peucker ` +
+      `(${SIMPLIFY_TOLERANCE_METERS}m), ${chunks.length} chunk(s):`
+  );
+
+  chunks.forEach((chunk, i) => {
+    console.log(
+      `[mapMatching]   chunk ${i + 1}/${chunks.length}: ${chunkDistanceKm(chunk, geometry.cumulative)}km, ` +
+        `${chunk.endIndex - chunk.startIndex} segments, ` +
+        `${chunkQueryPoints(chunk, geometry).length} query points`
+    );
+  });
 }
 
 interface OverpassGeometryNode {
@@ -245,6 +282,9 @@ interface OverpassElement {
   geometry?: OverpassGeometryNode[];
   tags?: Record<string, string>;
 }
+
+/** Overpass ran out of its own query-time budget for this chunk — halving the chunk may help. */
+class OverpassQueryTimeoutError extends Error {}
 
 async function fetchWaysAround(
   points: LatLon[],
@@ -262,7 +302,8 @@ async function fetchWaysAround(
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const detail = body?.error ? ` ${body.error}` : "";
-    throw new Error(`Overpass-Abfrage fehlgeschlagen (${response.status}).${detail}`);
+    const message = `Overpass-Abfrage fehlgeschlagen (${response.status}).${detail}`;
+    throw body?.queryTimedOut ? new OverpassQueryTimeoutError(message) : new Error(message);
   }
 
   const data: { elements: OverpassElement[] } = await response.json();
@@ -394,38 +435,72 @@ async function matchRoute(
   rawPoints: LatLon[],
   onProgress?: (progress: MatchProgress) => void
 ): Promise<MatchedSegment[]> {
-  const resampled = resampleRoute(rawPoints, MIN_POINT_SPACING_METERS);
-  const segments = buildSegments(resampled);
+  const matchPoints = resampleRoute(rawPoints, MIN_POINT_SPACING_METERS);
+  const segments = buildSegments(matchPoints);
 
   if (segments.length === 0) return [];
 
-  const chunks = chunkSegments(segments, CHUNK_TARGET_DISTANCE_METERS, CHUNK_BBOX_THRESHOLD_METERS);
-  logChunkStats(chunks);
+  const geometry: RouteGeometry = {
+    matchPoints,
+    segments,
+    cumulative: cumulativeDistances(matchPoints),
+    queryIndices: douglasPeuckerIndices(matchPoints, SIMPLIFY_TOLERANCE_METERS),
+  };
+
+  const queue = chunkByDistance(geometry.cumulative, CHUNK_MAX_DISTANCE_METERS);
+  logChunkStats(queue, geometry);
 
   const results: MatchedSegment[] = [];
   let previousMatchedWay: OsmWay | null = null;
+  let completedChunks = 0;
+  let requestsSent = 0;
 
   // Sequential, spaced-out requests: a good citizen of the public Overpass instance (docs,
   // Section 41), which otherwise starts rate-limiting after just a couple of rapid requests.
-  // Each chunk's ways are scored only against that chunk's own segments — an `around` query
-  // already covers those segments (see AROUND_QUERY_RADIUS_METERS), so nothing is missed, and
-  // this avoids scoring every segment in the route against every way ever fetched (which would
-  // be O(totalSegments × totalWays) and can stall the browser on long, multi-chunk routes).
-  for (let i = 0; i < chunks.length; i++) {
-    if (i > 0) await sleep(CHUNK_DELAY_MS);
+  // Chunks are processed in route order; a halved chunk's two parts go back to the front of the
+  // queue, so results stay in route order. Each chunk's ways are scored only against that
+  // chunk's own segments — its query corridor already covers them (see QUERY_CORRIDOR_METERS),
+  // and this avoids scoring every segment against every way ever fetched (which would be
+  // O(totalSegments × totalWays) and can stall the browser on long, multi-chunk routes).
+  while (queue.length > 0) {
+    const chunk = queue.shift()!;
+    const totalChunks = completedChunks + 1 + queue.length;
+    const chunkLabel =
+      `chunk ${completedChunks + 1}/${totalChunks}` +
+      (chunk.splitDepth > 0 ? ` (split level ${chunk.splitDepth})` : "");
 
-    const chunkLabel = `chunk ${i + 1}/${chunks.length}`;
-    const chunkWays = await fetchWaysAround(
-      chunks[i].aroundPoints,
-      AROUND_QUERY_RADIUS_METERS,
-      chunkLabel
-    );
+    if (requestsSent > 0) await sleep(CHUNK_DELAY_MS);
+    requestsSent++;
+
+    let chunkWays: OsmWay[];
+    try {
+      chunkWays = await fetchWaysAround(
+        chunkQueryPoints(chunk, geometry),
+        QUERY_CORRIDOR_METERS,
+        chunkLabel
+      );
+    } catch (err) {
+      const halves =
+        err instanceof OverpassQueryTimeoutError && chunk.splitDepth < MAX_CHUNK_SPLIT_DEPTH
+          ? splitChunk(chunk, geometry.cumulative)
+          : null;
+      if (!halves) throw err;
+
+      console.log(
+        `[mapMatching] ${chunkLabel}: Overpass query timed out, halving this ` +
+          `${chunkDistanceKm(chunk, geometry.cumulative)}km chunk into ` +
+          `${chunkDistanceKm(halves[0], geometry.cumulative)}km + ` +
+          `${chunkDistanceKm(halves[1], geometry.cumulative)}km`
+      );
+      queue.unshift(...halves);
+      continue;
+    }
 
     let chunkMatched = 0;
     let chunkAmbiguous = 0;
     let chunkUnmatched = 0;
 
-    for (const segment of chunks[i].segments) {
+    for (const segment of geometry.segments.slice(chunk.startIndex, chunk.endIndex)) {
       const candidates = scoreCandidates(
         segment,
         chunkWays,
@@ -453,11 +528,12 @@ async function matchRoute(
 
     console.log(
       `[mapMatching] ${chunkLabel}: ${chunkMatched} matched, ${chunkAmbiguous} ambiguous, ` +
-        `${chunkUnmatched} unmatched (of ${chunks[i].segments.length} segments, ` +
+        `${chunkUnmatched} unmatched (of ${chunk.endIndex - chunk.startIndex} segments, ` +
         `${chunkWays.length} candidate ways)`
     );
 
-    onProgress?.({ completedChunks: i + 1, totalChunks: chunks.length });
+    completedChunks++;
+    onProgress?.({ completedChunks, totalChunks: completedChunks + queue.length });
   }
 
   return results;

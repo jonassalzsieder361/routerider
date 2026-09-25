@@ -59,6 +59,37 @@ function cacheResponse(key: string, data: unknown): void {
   }
 }
 
+// Tags passed on to the client — what D7 surface inference and matching need (Build Guide,
+// Phase 3, "Finale v0.1-Spezifikation"). Overpass's `out geom` always returns every tag, so the
+// rest is dropped here, before caching and sending. Which *ways* are fetched is unaffected: the
+// query still selects every way[highway], without excluding any highway value.
+const RELEVANT_TAGS = [
+  "highway",
+  "surface",
+  "tracktype",
+  "smoothness",
+  "bicycle",
+  "cycleway",
+  "mtb:scale",
+];
+
+function keepRelevantTags(data: unknown): unknown {
+  const elements = (data as { elements?: unknown } | null)?.elements;
+  if (!Array.isArray(elements)) return data;
+
+  return {
+    ...(data as object),
+    elements: elements.map((el: { tags?: Record<string, string> }) => {
+      if (!el.tags) return el;
+      const tags: Record<string, string> = {};
+      for (const key of RELEVANT_TAGS) {
+        if (key in el.tags) tags[key] = el.tags[key];
+      }
+      return { ...el, tags };
+    }),
+  };
+}
+
 function isRetryableServerError(status: number): boolean {
   return status === 500 || status === 502 || status === 504;
 }
@@ -79,7 +110,9 @@ class EndpointError extends Error {
   constructor(
     public host: string,
     public status: number,
-    message: string
+    message: string,
+    /** Overpass's own query-time budget ran out (the `remark` case) — the query was too heavy. */
+    public queryTimedOut = false
   ) {
     super(message);
   }
@@ -197,11 +230,11 @@ async function queryEndpointOnce(
 
   if (typeof remark === "string" && remark.length > 0) {
     log(requestId, `← ${host} status=${response.status} (${durationMs}ms) Overpass runtime error: "${remark}"`);
-    throw new EndpointError(host, 504, `Overpass query did not complete: ${remark}`);
+    throw new EndpointError(host, 504, `Overpass query did not complete: ${remark}`, true);
   }
 
   log(requestId, `← ${host} status=${response.status} (${durationMs}ms) OK`);
-  return data;
+  return keepRelevantTags(data);
 }
 
 interface AroundPoint {
@@ -286,6 +319,15 @@ export async function POST(request: Request) {
     } catch (err) {
       if (err instanceof EndpointError) errors.push(err);
 
+      // Query too heavy for Overpass's own [timeout:25] budget: no retry on the same endpoint
+      // and no mirror attempt — the same query won't get lighter elsewhere. Report straight back
+      // so the client halves just this chunk (lib/mapMatching.ts). Load-type failures (429,
+      // HTTP 504, client timeouts) keep the retry/fallback path below, since those may pass later.
+      if (err instanceof EndpointError && err.queryTimedOut) {
+        log(requestId, `${endpointHost(endpoint)} query timed out (remark), skipping retry/mirror so the client can split the chunk`);
+        break;
+      }
+
       const isRateLimited = err instanceof EndpointError && err.status === 429;
       const isServerError = err instanceof EndpointError && isRetryableServerError(err.status);
 
@@ -309,6 +351,11 @@ export async function POST(request: Request) {
           return NextResponse.json(data);
         } catch (retryErr) {
           if (retryErr instanceof EndpointError) errors.push(retryErr);
+
+          if (retryErr instanceof EndpointError && retryErr.queryTimedOut) {
+            log(requestId, `${endpointHost(endpoint)} query timed out (remark) on retry, skipping mirror so the client can split the chunk`);
+            break;
+          }
         }
       }
 
@@ -324,11 +371,18 @@ export async function POST(request: Request) {
 
   const totalMs = Date.now() - requestStart;
   const details = errors.map((e) => `${e.host}: ${e.message}`).join(" | ");
-  log(requestId, `request failed after ${totalMs}ms, all ${OVERPASS_ENDPOINTS.length} endpoints failed: ${details}`);
+  const queryTimedOut = errors.some((e) => e.queryTimedOut);
+  log(
+    requestId,
+    queryTimedOut
+      ? `request failed after ${totalMs}ms, query too heavy (remark timeout): ${details}`
+      : `request failed after ${totalMs}ms, all ${OVERPASS_ENDPOINTS.length} endpoints failed: ${details}`
+  );
 
   const worstStatus = errors.find((e) => e.status === 429 || e.status === 504)?.status;
-  const reason =
-    worstStatus === 429
+  const reason = queryTimedOut
+    ? "Overpass query exceeded its own time limit (query too heavy)."
+    : worstStatus === 429
       ? "Overpass rate-limits requests (429 Too Many Requests)."
       : worstStatus === 504
         ? "Overpass timed out under load (504 Gateway Timeout)."
@@ -338,6 +392,9 @@ export async function POST(request: Request) {
     {
       error: `${reason} Tried: ${details || "no endpoint responded"}.`,
       upstreamStatus: errors[0]?.status ?? 502,
+      // Lets the client halve just this chunk and retry (lib/mapMatching.ts) instead of giving
+      // up on the whole route, when the attempt failed on query weight, not on load.
+      queryTimedOut,
     },
     { status: 502 }
   );

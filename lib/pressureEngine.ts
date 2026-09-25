@@ -1,4 +1,4 @@
-import type { BikeSetupValues, TireType } from "@/components/BikeSetup";
+import type { BikeSetupValues, TireType, WheelDiameter } from "@/components/BikeSetup";
 import type { SurfaceDistribution } from "@/lib/surfaceClassification";
 
 const KG_TO_LBS = 2.2046226218;
@@ -32,6 +32,15 @@ export function terrainModifier(distribution: SurfaceDistribution): number {
   );
 }
 
+// D8 "Wheel Diameter Modifier" (Nachtrag in docs/RouteRider - Build Guide v0.1.md, Phase 6/7):
+// 700c/29" is the reference; smaller wheels get more pressure. Applied after the terrain
+// modifier and before the D6 clamp. One value for the whole bike, front and rear alike.
+export const WHEEL_DIAMETER_MODIFIERS: Record<WheelDiameter, number> = {
+  "700c": 1.0,
+  "650b": 1.05,
+  "26": 1.08,
+};
+
 // docs/RouteRider Tire Pressure - Resolved Decisions D4-D7.md, D6 "Safety Pressure Bounds" —
 // v0.1 generic lookup table, researched per D6's note that concrete numbers are a prerequisite
 // for Phase 7. Tube/Tubeless (D4) only changes the minimum; the maximum is shared.
@@ -53,16 +62,19 @@ export interface WheelPressureInput {
   tireWidthMm: number;
   tireType: TireType;
   terrainModifier: number;
+  wheelDiameterModifier: number;
   /** Printed-on-sidewall override (D6) — replaces the generic table for this wheel when set. */
   userMinPsi?: number | null;
   userMaxPsi?: number | null;
 }
 
 export interface WheelPressureResult {
-  /** Final recommendation: terrain-adjusted, clamped to safety bounds, rounded to whole psi. */
+  /** Final recommendation: terrain- and wheel-adjusted, clamped to safety bounds, rounded to whole psi. */
   psi: number;
-  /** Pre-clamp value, after the terrain modifier, unrounded — for display/debugging. */
+  /** Pre-clamp value, after terrain and wheel-diameter modifiers, unrounded — for display/debugging. */
   rawPsi: number;
+  /** After the terrain modifier, before the wheel-diameter modifier (D8). */
+  terrainPsi: number;
   /** Pure Berto result before the terrain modifier. */
   basePsi: number;
   clamped: boolean;
@@ -72,7 +84,8 @@ export interface WheelPressureResult {
 
 export function calculateWheelPressure(input: WheelPressureInput): WheelPressureResult {
   const basePsi = bertoBasePressurePsi(input.wheelLoadLbs, input.tireWidthMm);
-  const rawPsi = basePsi * input.terrainModifier;
+  const terrainPsi = basePsi * input.terrainModifier;
+  const rawPsi = terrainPsi * input.wheelDiameterModifier;
 
   const bounds = safetyBoundsForWidth(input.tireWidthMm);
   const genericMin = input.tireType === "tubeless" ? bounds.minTubelessPsi : bounds.minTubePsi;
@@ -82,7 +95,7 @@ export function calculateWheelPressure(input: WheelPressureInput): WheelPressure
   const clamped = rawPsi < minPsi || rawPsi > maxPsi;
   const clampedPsi = Math.min(maxPsi, Math.max(minPsi, rawPsi));
 
-  return { psi: Math.round(clampedPsi), rawPsi, basePsi, clamped, minPsi, maxPsi };
+  return { psi: Math.round(clampedPsi), rawPsi, terrainPsi, basePsi, clamped, minPsi, maxPsi };
 }
 
 export interface FrontRearPressureInput {
@@ -98,9 +111,13 @@ export interface FrontRearPressureResult {
   front: WheelPressureResult;
   rear: WheelPressureResult;
   terrainModifier: number;
+  wheelDiameterModifier: number;
 }
 
-/** Ties Berto base pressure + terrain modifier + D6 safety clamp together for front and rear. */
+/**
+ * Ties Berto base pressure + terrain modifier + wheel-diameter modifier (D8) + D6 safety clamp
+ * together for front and rear.
+ */
 export function calculateFrontRearPressure(
   input: FrontRearPressureInput
 ): FrontRearPressureResult {
@@ -113,12 +130,14 @@ export function calculateFrontRearPressure(
   const rearLoadLbs = systemWeightLbs * (bikeSetup.rearWeightPercent / 100);
 
   const modifier = terrainModifier(distribution);
+  const wheelModifier = WHEEL_DIAMETER_MODIFIERS[bikeSetup.wheelDiameter];
 
   const front = calculateWheelPressure({
     wheelLoadLbs: frontLoadLbs,
     tireWidthMm: bikeSetup.frontTireWidthMm,
     tireType: bikeSetup.tireType,
     terrainModifier: modifier,
+    wheelDiameterModifier: wheelModifier,
     userMinPsi: input.frontUserMinPsi,
     userMaxPsi: input.frontUserMaxPsi,
   });
@@ -128,9 +147,10 @@ export function calculateFrontRearPressure(
     tireWidthMm: bikeSetup.rearTireWidthMm,
     tireType: bikeSetup.tireType,
     terrainModifier: modifier,
+    wheelDiameterModifier: wheelModifier,
     userMinPsi: input.rearUserMinPsi,
     userMaxPsi: input.rearUserMaxPsi,
   });
 
-  return { front, rear, terrainModifier: modifier };
+  return { front, rear, terrainModifier: modifier, wheelDiameterModifier: wheelModifier };
 }

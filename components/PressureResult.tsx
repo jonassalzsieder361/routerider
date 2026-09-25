@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { BikeSetupValues } from "@/components/BikeSetup";
+import { WHEEL_DIAMETER_LABELS, type BikeSetupValues } from "@/components/BikeSetup";
 import {
   calculateFrontRearPressure,
   SURFACE_MODIFIERS,
@@ -332,12 +332,29 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
             )}
             <WheelRow
               label="Nach Terrain"
+              front={`${formatDetail(front.terrainPsi, unit)} ${unit}`}
+              rear={`${formatDetail(rear.terrainPsi, unit)} ${unit}`}
+            />
+          </Step>
+
+          <Step
+            index={4}
+            title={`Laufrad-Modifier × ${result.wheelDiameterModifier.toFixed(2)}`}
+          >
+            <span>
+              {WHEEL_DIAMETER_LABELS[bikeSetup.wheelDiameter]}
+              {bikeSetup.wheelDiameter === "700c"
+                ? " ist die Referenz — keine Anpassung."
+                : " — kleinere Laufräder brauchen etwas mehr Druck."}
+            </span>
+            <WheelRow
+              label="Nach Laufrad"
               front={`${formatDetail(front.rawPsi, unit)} ${unit}`}
               rear={`${formatDetail(rear.rawPsi, unit)} ${unit}`}
             />
           </Step>
 
-          <Step index={4} title="Sicherheitsbereich">
+          <Step index={5} title="Sicherheitsbereich">
             <WheelRow
               label="Erlaubt"
               front={`${formatPressure(front.minPsi, unit)}–${formatPressure(front.maxPsi, unit)} ${unit}`}
@@ -370,7 +387,7 @@ export function PressureResult({ bikeSetup, distribution }: PressureResultProps)
             )}
           </Step>
 
-          <Step index={5} title="Empfehlung">
+          <Step index={6} title="Empfehlung">
             <WheelRow
               label="Gerundet"
               front={`${formatPressure(front.psi, unit)} ${unit}`}

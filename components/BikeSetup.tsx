@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 export type TireType = "tube" | "tubeless";
 export type RideType = "performance" | "gravel" | "bikepacking";
+export type WheelDiameter = "700c" | "650b" | "26";
 
 export interface BikeSetupValues {
   riderWeightKg: number;
@@ -12,6 +13,8 @@ export interface BikeSetupValues {
   frontTireWidthMm: number;
   rearTireWidthMm: number;
   tireType: TireType;
+  /** D8 — one value for the whole bike, no separate front/rear field. */
+  wheelDiameter: WheelDiameter;
   rideType: RideType;
   /** Front/rear always sum to 100 by construction — rear is derived, never stored separately. */
   frontWeightPercent: number;
@@ -32,6 +35,13 @@ const RIDE_TYPE_PRESETS: Record<RideType, { label: string; front: number }> = {
 
 const RIDE_TYPE_ORDER: RideType[] = ["performance", "gravel", "bikepacking"];
 const DEFAULT_RIDE_TYPE: RideType = "gravel";
+
+export const WHEEL_DIAMETER_LABELS: Record<WheelDiameter, string> = {
+  "700c": '700c / 29"',
+  "650b": '650b / 27,5"',
+  "26": '26"',
+};
+const WHEEL_DIAMETER_ORDER: WheelDiameter[] = ["700c", "650b", "26"];
 
 // v0.1 calibration bounds for this data-entry step only — not the D6 safety pressure
 // bounds (those clamp the Phase 7 pressure recommendation, a separate concern).
@@ -133,6 +143,7 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
   const [frontTireWidthMm, setFrontTireWidthMm] = useState(TIRE_WIDTH_BOUNDS.default);
   const [rearTireWidthMm, setRearTireWidthMm] = useState(TIRE_WIDTH_BOUNDS.default);
   const [tireType, setTireType] = useState<TireType>("tubeless");
+  const [wheelDiameter, setWheelDiameter] = useState<WheelDiameter>("700c");
   const [rideType, setRideType] = useState<RideType>(DEFAULT_RIDE_TYPE);
   const [frontWeightPercent, setFrontWeightPercent] = useState(
     RIDE_TYPE_PRESETS[DEFAULT_RIDE_TYPE].front
@@ -149,6 +160,7 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
       frontTireWidthMm,
       rearTireWidthMm,
       tireType,
+      wheelDiameter,
       rideType,
       frontWeightPercent,
       rearWeightPercent,
@@ -163,6 +175,7 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
     frontTireWidthMm,
     rearTireWidthMm,
     tireType,
+    wheelDiameter,
     rideType,
     frontWeightPercent,
     rearWeightPercent,
@@ -255,6 +268,18 @@ export function BikeSetup({ onChange }: BikeSetupProps) {
           value={tireType}
           onChange={setTireType}
         />
+
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[13px] font-medium text-[#1A1A1A]">Laufraddurchmesser</span>
+          <SegmentedToggle
+            options={WHEEL_DIAMETER_ORDER.map((d) => ({
+              value: d,
+              label: WHEEL_DIAMETER_LABELS[d],
+            }))}
+            value={wheelDiameter}
+            onChange={setWheelDiameter}
+          />
+        </div>
       </div>
 
       <div className="flex flex-col gap-3">

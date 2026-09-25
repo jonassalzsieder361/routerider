@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 
 // Diagnostic only, investigating why 504s reproduce for manual testing but not for automated
@@ -26,6 +27,37 @@ const REQUEST_TIMEOUT_MS = 45000;
 // mirror on the primary's first hiccup mostly just adds a slow, likely-to-also-fail detour. A
 // same-endpoint retry on the primary catches a one-off 5xx blip without paying that cost.
 const PRIMARY_RETRY_DELAY_MS = 3000;
+
+// 429 means the per-IP concurrent slots are used up and the server wants a cool-down (Overpass
+// fair-use docs), not that it is broken — so it gets its own, much longer backoff on the primary
+// instead of an immediate detour to the usually-overloaded mirror.
+const RATE_LIMIT_RETRY_DELAY_MS = 18000;
+
+// Exact-query cache: successful responses, keyed by the Overpass query we actually generate (not
+// the raw GPX), kept for as long as this route module lives (until the dev server restarts or
+// recompiles it). The same route uploaded twice produces the same query and is answered from
+// here instead of hitting the public instance again. Errors are never cached. Capped so a
+// long-running server can't grow it without bound; oldest entry goes first.
+const RESPONSE_CACHE_MAX_ENTRIES = 200;
+const responseCache = new Map<string, unknown>();
+
+/**
+ * Whitespace-normalized query, hashed. The query itself is built deterministically from the
+ * chunk's points and radius, so identical input always yields the same key; hashing just keeps
+ * keys short instead of holding multi-KB query strings as Map keys.
+ */
+function cacheKey(query: string): string {
+  const normalized = query.trim().replace(/\s+/g, " ");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function cacheResponse(key: string, data: unknown): void {
+  responseCache.set(key, data);
+  if (responseCache.size > RESPONSE_CACHE_MAX_ENTRIES) {
+    const oldestKey = responseCache.keys().next().value;
+    if (oldestKey !== undefined) responseCache.delete(oldestKey);
+  }
+}
 
 function isRetryableServerError(status: number): boolean {
   return status === 500 || status === 502 || status === 504;
@@ -230,6 +262,13 @@ export async function POST(request: Request) {
     `new request: ${points.length} points, radius=${radiusMeters}m, query length=${query.length} chars`
   );
 
+  const key = cacheKey(query);
+  const cached = responseCache.get(key);
+  if (cached !== undefined) {
+    log(requestId, `cache hit (key ${key.slice(0, 12)}…, ${responseCache.size} cached queries), no Overpass request sent`);
+    return NextResponse.json(cached);
+  }
+
   const errors: EndpointError[] = [];
 
   for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
@@ -242,16 +281,23 @@ export async function POST(request: Request) {
         requestId,
         `request succeeded via ${endpointHost(endpoint)} after ${Date.now() - requestStart}ms total`
       );
+      cacheResponse(key, data);
       return NextResponse.json(data);
     } catch (err) {
       if (err instanceof EndpointError) errors.push(err);
 
-      if (isPrimary && err instanceof EndpointError && isRetryableServerError(err.status)) {
+      const isRateLimited = err instanceof EndpointError && err.status === 429;
+      const isServerError = err instanceof EndpointError && isRetryableServerError(err.status);
+
+      if (isPrimary && (isRateLimited || isServerError)) {
+        const delayMs = isRateLimited ? RATE_LIMIT_RETRY_DELAY_MS : PRIMARY_RETRY_DELAY_MS;
         log(
           requestId,
-          `${endpointHost(endpoint)} returned ${err.status}, retrying same endpoint once after ${PRIMARY_RETRY_DELAY_MS}ms`
+          isRateLimited
+            ? `${endpointHost(endpoint)} rate-limited (429), backing off ${delayMs}ms before retrying same endpoint once`
+            : `${endpointHost(endpoint)} returned ${(err as EndpointError).status}, retrying same endpoint once after ${delayMs}ms`
         );
-        await sleep(PRIMARY_RETRY_DELAY_MS);
+        await sleep(delayMs);
 
         try {
           const data = await queryEndpointOnce(requestId, endpoint, query);
@@ -259,6 +305,7 @@ export async function POST(request: Request) {
             requestId,
             `request succeeded via ${endpointHost(endpoint)} (retry) after ${Date.now() - requestStart}ms total`
           );
+          cacheResponse(key, data);
           return NextResponse.json(data);
         } catch (retryErr) {
           if (retryErr instanceof EndpointError) errors.push(retryErr);

@@ -110,7 +110,7 @@ Für jede der folgenden Phasen gilt dasselbe Muster:
 - Bestätigt funktionierend: 18,9 km ländlich (Brandenburg) → 189 Segmente, 0 ohne Match; 57,4 km durch Berlin-Innenstadt → 826 Segmente/177 mehrdeutig/5 ohne Match.
 - **Befund (2026-09-25):** Auch eine normale 110km-Route kann mit `429 Too Many Requests` scheitern (Chunk 2 von 6), wenn gleichzeitig der Fallback-Mirror überlastet ist. Root Cause laut [Overpass Fair Use Policy](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html): begrenzte Concurrent-Slots + lastabhängiges Cool-Down pro IP — bei mehreren Testrouten kurz hintereinander leicht überschritten. **Kein Randfall wie die >150km-Routen unten, sondern kann jede normale Bikepacking-Tagesdistanz treffen.** Sofortmaßnahme bei akutem 429: ein paar Minuten warten, erneut versuchen.
 
-**Finale v0.1-Spezifikation für den Overpass-Umbau (2026-09-25, nach zwei Feedback-Runden abgestimmt, umzusetzen in 3 getrennten Commits):**
+**Finale v0.1-Spezifikation für den Overpass-Umbau (2026-09-25, nach zwei Feedback-Runden abgestimmt, umzusetzen in 3 getrennten Commits — ergänzt um Commit 4, siehe unten):**
 
 Kernidee: Query-Auflösung ≠ Matching-Auflösung — die Overpass-Anfrage bekommt eine vereinfachte Route, das Map Matching läuft weiterhin mit den vollständigen Original-GPX-Punkten. Bewusst konservativ gehalten (nicht gleichzeitig Matching-Logik, OSM-Filterung und Cache-Architektur anfassen):
 
@@ -126,6 +126,7 @@ Kernidee: Query-Auflösung ≠ Matching-Auflösung — die Overpass-Anfrage beko
 1. `D8` (Wheel Diameter Modifier, siehe unten bei Phase 6/7). ✅ erledigt (2026-09-25)
 2. `Overpass 429 retry + exact query cache` — gegen die bestehende Chunking-Logik getestet (Chunk-Anzahl ändert sich hier noch nicht). ✅ erledigt (2026-09-25) — Cache verifiziert (zweiter Durchlauf 13ms statt 13,4s), 429-Backoff am selben Tag mehrfach live bestätigt.
 3. `Adaptive route simplification + ~50km chunking` (Douglas-Peucker + neues Chunking + 40m-Korridor + Tag-Filter) — danach die Chunk-Reduktion sichtbar. ✅ erledigt (2026-09-25), inkl. Regression nach der remark-Änderung (siehe unten).
+4. `Overpass multi-mirror failover` (konfigurierbare Endpoint-Liste inkl. `overpass.private.coffee`, siehe Abschnitt „Overpass-Resilienz" unten) — erst NACH Commit 3, damit sich Wirkung von weniger Requests und Wirkung von mehr Mirrors getrennt messen lassen. ⏳ gebaut, STOP→Test offen (2026-11-25)
 
 *Testergebnisse Commit 3 (2026-09-25, vor der remark-Änderung; Match-Logik und Query seitdem unverändert):* 9,5km → 1 Chunk, 162 gematcht / 53 mehrdeutig / 0 ohne Match. 57,4km Grunewald → 2 Chunks à 28,5km, beide per remark-Timeout halbiert, 832 / 176 (17,5%) / 0 ohne Match (vorher 826 / 177 / 5 bei denselben 1008 Segmenten). Offline-Prüfung aller Testrouten: jedes Segment genau einmal abgedeckt, max. 11,9m Abstand zur Query-Linie, 192,8km → 4 statt 9 Chunks.
 
@@ -136,8 +137,64 @@ Kernidee: Query-Auflösung ≠ Matching-Auflösung — die Overpass-Anfrage beko
 
 **Hinweis zum Testen von Commit 2:** der 429-Backoff-Pfad lässt sich nicht zuverlässig auf Kommando auslösen — beim STOP→Test hier auf die Cache-Verifikation konzentrieren (dieselbe Route innerhalb derselben Browser-Session zweimal hochladen, zweiter Durchlauf sollte spürbar schneller sein/keine neuen Overpass-Requests erzeugen). Der 429-Pfad wird nur bei Gelegenheit real bestätigt.
 
-- **Offener Punkt:** sehr lange Mehrtages-Routen (getestet: 192,8 km) sind noch nicht zuverlässig bestätigt — wird mit Commit 3 oben erneut getestet und möglicherweise aufgelöst. Bei Bedarf später eigene Overpass-Instanz oder bezahlten Anbieter evaluieren.
+- **Offener Punkt:** sehr lange Mehrtages-Routen (getestet: 192,8 km) sind noch nicht zuverlässig bestätigt — wird mit Commit 3 oben erneut getestet und möglicherweise aufgelöst. Bei weiterhin Timeouts: Eskalationsstufen im Abschnitt „Overpass-Resilienz" unten (Mirror-Failover → Postpass → bezahlter Anbieter).
 - **Long-route validation:** The 192.8 km test route could not yet be validated end-to-end due to repeated HTTP 504 and client-side timeouts during high Overpass server load. Chunking behavior and long-route reliability require an additional test under normal server conditions.
+
+### Overpass-Resilienz — Mirror-Failover & Eskalationsstufen (2026-11-25)
+
+**Kontext:** Die öffentlichen Overpass-Instanzen sind seit Monaten überlastet (siehe [OSM-Forum: Overpass API performance issues](https://community.openstreetmap.org/t/overpass-api-performance-issues/140598)). Die öffentlichen Instanzen werden privat/community-betrieben; für kommerzielle oder intensive Nutzung wird dort ausdrücklich auf eigene Instanz oder bezahlte Anbieter verwiesen. Deshalb Eskalation in Stufen — jede Stufe erst angehen, wenn die vorherige nachweislich nicht reicht. **Reihenfolge: Commit 2 → Commit 3 → Commit 4 (Stufe 1) → bei Bedarf Stufe 2 → bei Bedarf Stufe 3.**
+
+**Stufe 1 — Mirror-Failover (Commit 4, Umsetzung jetzt vorgesehen)**
+
+Bewusst klein gehalten: nur die Endpoint-Auswahl und das Fehlerhandling erweitern, KEINE Änderung an Query-Aufbau, Chunking oder Matching.
+
+- **Konfigurierbare Endpoint-Liste** statt hartkodierter Primary/Fallback-Mirror. Env-Variable `OVERPASS_ENDPOINTS` (kommagetrennt, in Priorität; Einträge getrimmt, ungültige URLs werden mit Log-Meldung verworfen; leer/ungesetzt → Default), Default:
+  1. `https://overpass-api.de/api/interpreter` (Primary)
+  2. `https://overpass.kumi.systems/api/interpreter` (bestehender Mirror)
+  3. `https://overpass.private.coffee/api/interpreter` (neu; wirbt laut [Betreiberseite](https://osm.hpi.de/overpass/index.html) mit freiem Zugang ohne Rate-Limits, auch kommerziell nutzbar — **keine Garantie**, laut Forum läuft keine Alternativ-Instanz dauerhaft stabil)
+- **Failover-Regeln pro Chunk** (weiterhin strikt sequenziell, keine parallelen Requests; 2026-11-25 abgestimmt, bestätigtes Verhalten aus Commit 2/3 bleibt erhalten):
+  - Query-Timeout (HTTP 200 + leeres `elements` + `remark`) → sofort abbrechen, NICHT am nächsten Mirror wiederholen (dieselbe zu schwere Query wird dort nicht leichter); der Client halbiert genau diesen Chunk (Sicherheitsnetz aus Commit 3). **Kein Cool-Down** — ein Timeout heißt „Query zu schwer“, nicht „Server ungesund“.
+  - `429` → ~18s Backoff + ein Retry **nur beim Primary**; bei allen anderen Endpoints und bei einem Primary im Cool-Down sofort weiter zum nächsten. Cool-Down: am Primary erst, wenn auch der Retry scheitert; bei anderen Endpoints sofort.
+  - `500`/`502`/`504` → 3s-Retry **nur beim Primary** (live bestätigt: „504 → Retry OK“), danach nächster Endpoint; bei anderen Endpoints sofort weiter. Cool-Down beim Failover.
+  - `503`, Netzwerkfehler, Client-Timeout → sofort nächster Endpoint, ohne Wartezeit. Cool-Down beim Failover.
+  - Scheitern alle Endpoints an Last (nicht remark) → Fehler an den Nutzer, kein Halbieren.
+- **Kurzer Cool-Down pro Endpoint:** Ein Endpoint, von dem wegen Last weitergeschaltet wurde (429, 5xx, Netzwerkfehler/Client-Timeout — nicht remark), wird für 60s ans Ende der Liste gestellt, nicht ausgeschlossen (In-Memory, best effort — auf Vercel Serverless nicht persistent, das ist für v0.1 ok). Eine erfolgreiche Antwort beendet den Cool-Down des Hosts sofort. Verhindert, dass jeder Chunk erneut zuerst den kaputten Server anfragt.
+- **Logging:** Pro Request loggen, welcher Endpoint geantwortet hat und wie viele Fehlversuche davor lagen (Server-Log). Der antwortende Host steht zusätzlich im Response-Header `X-Overpass-Endpoint` (`cache` bei Cache-Treffer), sichtbar im Browser-Network-Tab. Das ist die Datengrundlage für die Entscheidung über Stufe 2/3.
+- **Worst-Case-Dauer:** Mit 3 Endpoints (je 45s Client-Timeout) plus 18s-Backoff/Retry am Primary liegt ein einzelner Request im schlimmsten Fall bei über 2 Minuten. Lokal unkritisch; vor einem Deployment auf Vercel muss `maxDuration` der Route geprüft werden (jetzt bewusst nicht umgebaut).
+- **Cache bleibt endpoint-unabhängig:** Der Exact-Query-Cache-Key aus Commit 2 darf den Endpoint NICHT enthalten (gleiche Query = gleiches Ergebnis, egal von welchem Mirror).
+- **Datenqualität:** Mirrors können unterschiedlich aktuell sein. Für v0.1 akzeptiert, aber im Log festhalten, welcher Mirror geantwortet hat, falls Matching-Ergebnisse zwischen Läufen abweichen.
+
+**Standard-Testrouten (ab 2026-11-25, für alle künftigen Änderungen an Overpass, Map Matching oder Surface-Klassifizierung; Dateien in `RouteRider-test-routes/`):**
+
+| Reihenfolge | Datei | Länge / Lage | Prüft | Referenz (Gematcht / Mehrdeutig / ohne Match) |
+|---|---|---|---|---|
+| **1. (Standard-Ersttest)** | `2026-09-16_3287885468_RouteRider Test.gpx` | 18,9km, ländlich (Brandenburg) | Grundfunktion mit leichter Query — kommt auch bei ausgelasteten Overpass-Servern am ehesten durch | 189 Segmente, 0 ohne Match (Stand vor Commit 3); exakte Werte werden beim ersten erfolgreichen Lauf nach Commit 4 hier eingetragen |
+| 2. | `2026-06-30_3074972624_Ali und Heim.gpx` | 9,5km, Berlin-Stadt | Präzision in dichter Stadt | 162 / 53 / 0 (2026-09-25, nach Commit 3) |
+| 3. | `2026-08-30_…_Grunewald….gpx` | 57,4km, Berlin Wald + Stadt | Chunk-Grenzen, remark → Halbieren | 1008 Segmente, 832 / 176 / 0 (2026-09-25, nach Commit 3) |
+| 4. | `2026-07-10_3098459414_Wochenende 2 - Nächte.gpx` | 192,8km, Berlin → Brandenburg | Lange Route, Request-Anzahl, Endpoint-Verteilung | noch keine (End-to-End offen) |
+
+Begründung für die 18,9km-Route als Ersttest: Die 9,5km-Route liegt komplett in der Stadt und deckt den ländlichen Hauptanwendungsfall nicht ab; außerdem scheitern Stadt-Queries bei Server-Überlast zuerst (beobachtet 2026-11-25: alle drei öffentlichen Instanzen ausgelastet, 4 von 5 Stadt-Läufen gescheitert). Reihenfolge immer 1 → 4; scheitert schon Route 1 an Server-Last, die übrigen Routen nicht direkt hinterher testen, sondern später erneut versuchen. Hinweis: Ein Ergebnis kann ±1 Segment zwischen Gematcht und Mehrdeutig abweichen, wenn ein anderer Mirror geantwortet hat oder sich OSM-Daten geändert haben (beobachtet 2026-11-25: 9,5km über kumi → 161 / 54 / 0); den antwortenden Host im Server-Log notieren.
+
+**STOP → Test für Commit 4:**
+- Standard-Ersttest 18,9km läuft durch und liefert wieder 189 Segmente mit 0 ohne Match; die exakten Werte als Referenz in die Tabelle oben eintragen.
+- Kurze Route (9,5km) und mittlere Route (57,4km Berlin) zeigen unverändert dieselben Segment-Zahlen wie vorher (Regressionstest — Failover darf das Ergebnis nicht ändern).
+- Failover simulieren: temporär einen ungültigen Endpoint (z. B. `https://invalid.example/api/interpreter`) an die erste Stelle von `OVERPASS_ENDPOINTS` setzen → Route muss trotzdem durchlaufen, Log zeigt Wechsel auf den nächsten Endpoint.
+- Lange Route (192,8km) erneut testen und Log auswerten: Welcher Endpoint hat wie oft geantwortet?
+
+**Stufe 2 — Postpass als Alternative zu Overpass (nur bei Bedarf, noch NICHT bauen)**
+
+- [Postpass](https://community.openstreetmap.org/t/hosted-osm-databases-as-a-service-accessible-via-api/141955) ist eine öffentliche OSM-PostGIS-Instanz (SQL statt Overpass-QL), in der Community als Ausweich-Lösung genannt. Geofabrik-Aussage dazu: keine Garantien, Service noch relativ neu.
+- Technisch passt es gut: Ways entlang einer (vereinfachten) Route lassen sich mit `ST_DWithin` effizient abfragen. Aufwand: Query komplett neu schreiben und die Tags (`highway`, `surface`, `tracktype`, `smoothness`, `bicycle`, `cycleway`, `mtb:scale`) wieder im bisherigen Format ausgeben, damit D7-Inferenz und Matching unverändert weiterlaufen.
+- **Voraussetzung vor dem Bau:** OSM-Datenzugriff hinter eine klare Schnittstelle legen (z. B. ein `OsmWayProvider`-Interface mit `fetchWaysAlongRoute(...)`), sodass Overpass und Postpass austauschbar sind — das entspricht auch der Vorgabe aus D5 (Matching-Modul als austauschbare Komponente). Falls diese Trennung im Code noch nicht sauber existiert, ist sie der erste Schritt von Stufe 2.
+- **Auslöser:** Nach Commit 3 + 4 treten bei normalen Routen (≤ 110km) weiterhin regelmäßig Ausfälle auf (Richtwert: mehr als 1 von 10 Testläufen scheitert). Vor dem Bau die aktuelle Postpass-Doku zu Endpoint, Limits und Timeouts prüfen — hier sind keine Details bestätigt.
+
+**Stufe 3 — Bezahlter Overpass-Dienst (Notfall-Option, falls Stufe 1+2 nicht reichen oder die App live geht)**
+
+- **Geofabrik Overpass API** ([Preise](https://www.geofabrik.de/data/overpass-api.html), netto): Small 10.000 Requests/Monat = 40 €/Monat, Medium 100.000 = 80 €, Large 1.000.000 = 160 €, XXL unbegrenzt ab 550 €. Bezahlung **ein Jahr im Voraus** (also mindestens 480 € Verpflichtung bei Small). Preise gelten unter der Annahme, dass Queries die Server nicht übermäßig belasten. Auf der Seite stehen keine Angaben zu Rate-Limits oder Timeouts → **vor dem Kauf per Kontaktformular nach SLA, Timeout-Limit und Abdeckung (Planet oder Extrakt) fragen.**
+- **Mengengerüst:** Mit ~50km-Chunks sind es ca. 4 Requests pro 190km-Route (Cache senkt das weiter). Small (10.000 Requests) reicht damit rechnerisch für ~2.500 lange Routen im Monat.
+- Alternative kommerzielle Option: MapLark (eigenes API/GeoJSON, keine Overpass-QL → Query-Umbau nötig, daher nicht erste Wahl).
+- **Langfristig bei echtem Traffic:** eigener Overpass-Server oder PostGIS mit Geofabrik-Extrakt (Deutschland), auf kleinem eigenem Server (nicht auf Vercel lauffähig).
+- **Entscheidungsregel:** Stufe 3 erst, wenn (a) Stufe 1+2 nicht reichen UND (b) die App über Testnutzung hinaus echte Nutzer hat oder Jonas die Ausfälle beim Testen nicht mehr tolerieren will. Bis dahin: Public-Infrastruktur genügt laut Product Sheet Section 41 ("Infrastructure Principle") für Entwicklung und frühe Tests.
 
 **Phase 4 — OSM Surface Analysis**: Klassifizierung Paved/Gravel/Trail/Unknown (Section 11) + Inference-Regeltabelle aus D7. ✅ erledigt — von Jonas als gut funktionierend bestätigt.
 
@@ -165,7 +222,7 @@ Hinweis aus den Phase-3-Tests: bei dichten Stadtrouten (z. B. Berlin-Innenstadt)
 
 ## 4. Was NICHT in v0.1 gehört
 
-Laut Product Sheet Section 42 explizit ausgeschlossen: Weather-Anpassung, feinere Surface-Roughness, User Accounts, Datenbank, Strava/Komoot-Integration, Routenplanung, Navigation, POIs, **Fueling** (kommt als v0.2), Social Features, native Apps. Räumliches Tile-Caching für Overpass (siehe oben) ebenfalls bewusst auf später verschoben.
+Laut Product Sheet Section 42 explizit ausgeschlossen: Weather-Anpassung, feinere Surface-Roughness, User Accounts, Datenbank, Strava/Komoot-Integration, Routenplanung, Navigation, POIs, **Fueling** (kommt als v0.2), Social Features, native Apps. Räumliches Tile-Caching für Overpass (siehe oben) ebenfalls bewusst auf später verschoben. Ebenso nicht in v0.1: Postpass-Umbau und bezahlter Overpass-Dienst (Stufe 2/3 im Abschnitt „Overpass-Resilienz") — nur bei nachgewiesenem Bedarf.
 
 ## 5. Design
 

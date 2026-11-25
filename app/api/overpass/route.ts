@@ -10,12 +10,70 @@ let lastRequestAt: number | null = null;
 
 // Public instances, acceptable for development/early testing (see docs/RouteRider Tire
 // Pressure.pdf, Section 41). Not assumed to be permanent production infrastructure. Tried in
-// order, sequentially — the mirror is only used after the primary has actually failed, never
-// preemptively and never in parallel (that would burn request quota on both at once).
-const OVERPASS_ENDPOINTS = [
+// priority order, sequentially — a mirror is only used after the endpoint before it has actually
+// failed, never preemptively and never in parallel (that would burn request quota on several at
+// once). Overridable via OVERPASS_ENDPOINTS (comma-separated, priority order; see .env.example).
+// The first configured endpoint is the "primary": only it gets the same-endpoint retries below.
+const DEFAULT_OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
 ];
+
+function resolveEndpoints(raw: string | undefined): string[] {
+  if (!raw || raw.trim() === "") return DEFAULT_OVERPASS_ENDPOINTS;
+
+  const valid: string[] = [];
+  for (const entry of raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0)) {
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      console.log(`[overpass] OVERPASS_ENDPOINTS: ignoring invalid URL "${entry}"`);
+      continue;
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      console.log(`[overpass] OVERPASS_ENDPOINTS: ignoring non-http(s) URL "${entry}"`);
+      continue;
+    }
+    if (!valid.includes(url.href)) valid.push(url.href);
+  }
+
+  if (valid.length === 0) {
+    console.log("[overpass] OVERPASS_ENDPOINTS contained no valid URL, using defaults");
+    return DEFAULT_OVERPASS_ENDPOINTS;
+  }
+  return valid;
+}
+
+const OVERPASS_ENDPOINTS = resolveEndpoints(process.env.OVERPASS_ENDPOINTS);
+const PRIMARY_ENDPOINT = OVERPASS_ENDPOINTS[0];
+console.log(`[overpass] endpoints (priority order): ${OVERPASS_ENDPOINTS.join(", ")}`);
+
+// An endpoint we just failed over from because of load — 429 (on the primary only after its
+// retry also failed), 5xx, network error or client timeout — is moved to the back of the order
+// for this long, so the next chunk doesn't start on the server that just struggled. A `remark`
+// query timeout does NOT trigger it: that means the query was too heavy, not the server unhealthy. Moved
+// back, never excluded: if everything ahead of it fails, it is still tried. In-memory and best
+// effort — lost on restart/recompile, and not shared between serverless instances (fine for v0.1).
+const ENDPOINT_COOLDOWN_MS = 60_000;
+const cooldownUntil = new Map<string, number>();
+
+function isCoolingDown(endpoint: string, now: number): boolean {
+  return (cooldownUntil.get(endpoint) ?? 0) > now;
+}
+
+/** Configured priority order, with endpoints currently in cool-down moved (stably) to the end. */
+function endpointsInTryOrder(now: number): string[] {
+  const ready = OVERPASS_ENDPOINTS.filter((e) => !isCoolingDown(e, now));
+  const coolingDown = OVERPASS_ENDPOINTS.filter((e) => isCoolingDown(e, now));
+  return [...ready, ...coolingDown];
+}
+
+function startCooldown(requestId: string, endpoint: string, reason: string): void {
+  cooldownUntil.set(endpoint, Date.now() + ENDPOINT_COOLDOWN_MS);
+  log(requestId, `${endpointHost(endpoint)} put in ${ENDPOINT_COOLDOWN_MS / 1000}s cool-down (${reason})`);
+}
 
 // One attempt per endpoint. 45s because logs showed the public instances taking up to ~70s to
 // respond under load while still answering successfully — a shorter client timeout misreports a
@@ -25,13 +83,19 @@ const REQUEST_TIMEOUT_MS = 45000;
 // Status-check-confirmed pattern: overpass-api.de (primary) is almost always healthy and fast,
 // overpass.kumi.systems (mirror) is almost always heavily overloaded — falling through to the
 // mirror on the primary's first hiccup mostly just adds a slow, likely-to-also-fail detour. A
-// same-endpoint retry on the primary catches a one-off 5xx blip without paying that cost.
+// same-endpoint retry on the primary catches a one-off 500/502/504 blip without paying that cost.
+// Mirrors get no same-endpoint retry; 503 and network errors go straight to the next endpoint.
 const PRIMARY_RETRY_DELAY_MS = 3000;
 
 // 429 means the per-IP concurrent slots are used up and the server wants a cool-down (Overpass
 // fair-use docs), not that it is broken — so it gets its own, much longer backoff on the primary
-// instead of an immediate detour to the usually-overloaded mirror.
+// instead of an immediate detour to the usually-overloaded mirror. Primary only, and only when it
+// isn't already in cool-down (then it was just rate-limited and waiting again is unlikely to help).
 const RATE_LIMIT_RETRY_DELAY_MS = 18000;
+
+// Worst case for one request: every endpoint runs into REQUEST_TIMEOUT_MS, plus the primary's
+// backoff and retry — well over 2 minutes with 3 endpoints. Fine locally; before deploying to
+// Vercel, this route's maxDuration has to be checked (Build Guide, "Overpass-Resilienz").
 
 // Exact-query cache: successful responses, keyed by the Overpass query we actually generate (not
 // the raw GPX), kept for as long as this route module lives (until the dev server restarts or
@@ -299,79 +363,117 @@ export async function POST(request: Request) {
   const cached = responseCache.get(key);
   if (cached !== undefined) {
     log(requestId, `cache hit (key ${key.slice(0, 12)}…, ${responseCache.size} cached queries), no Overpass request sent`);
-    return NextResponse.json(cached);
+    return NextResponse.json(cached, { headers: { "X-Overpass-Endpoint": "cache" } });
   }
 
   const errors: EndpointError[] = [];
+  const tryOrder = endpointsInTryOrder(Date.now());
+  const coolingDownAtStart = new Set(tryOrder.filter((e) => isCoolingDown(e, Date.now())));
+  if (coolingDownAtStart.size > 0) {
+    log(
+      requestId,
+      `in cool-down, moved to the end: ${[...coolingDownAtStart].map(endpointHost).join(", ")} — ` +
+        `try order: ${tryOrder.map(endpointHost).join(" → ")}`
+    );
+  }
 
-  for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
-    const endpoint = OVERPASS_ENDPOINTS[i];
-    const isPrimary = i === 0;
+  /** Success path: cache, log which host answered after how many failed attempts, tag the response. */
+  const succeed = (endpoint: string, data: unknown, viaRetry: boolean) => {
+    cooldownUntil.delete(endpoint);
+    log(
+      requestId,
+      `request succeeded via ${endpointHost(endpoint)}${viaRetry ? " (retry)" : ""} after ` +
+        `${errors.length} failed attempt(s), ${Date.now() - requestStart}ms total`
+    );
+    cacheResponse(key, data);
+    return NextResponse.json(data, { headers: { "X-Overpass-Endpoint": endpointHost(endpoint) } });
+  };
+
+  /**
+   * Records a failed attempt. Returns true when the whole request must stop here: a `remark`
+   * query timeout means the query is too heavy for Overpass's own [timeout:25] budget, and the
+   * same query won't get lighter on another mirror — report straight back so the client halves
+   * just this chunk (lib/mapMatching.ts).
+   */
+  // No cool-down here: a remark timeout says the query was too heavy, not that the server is
+  // unhealthy — the halved chunk may go to the same endpoint again right away.
+  const recordFailure = (endpoint: string, err: unknown): boolean => {
+    if (err instanceof EndpointError) errors.push(err);
+
+    if (err instanceof EndpointError && err.queryTimedOut) {
+      log(requestId, `${endpointHost(endpoint)} query timed out (remark), skipping retry/mirrors so the client can split the chunk`);
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * Called once we give up on an endpoint for this request (after the primary's retry, if any)
+   * and fail over: load-type failures — 429, 5xx, network errors / client timeouts (status 0) —
+   * move it to the back of the order for the next requests. Other statuses (e.g. 4xx) don't.
+   */
+  const cooldownAfterFailover = (endpoint: string, err: unknown) => {
+    const status = err instanceof EndpointError ? err.status : 0;
+    if (status === 429) startCooldown(requestId, endpoint, "429 rate limit");
+    else if (status >= 500) startCooldown(requestId, endpoint, `HTTP ${status}`);
+    else if (status === 0) startCooldown(requestId, endpoint, "network error / client timeout");
+  };
+
+  let stoppedOnQueryTimeout = false;
+
+  for (let i = 0; i < tryOrder.length && !stoppedOnQueryTimeout; i++) {
+    const endpoint = tryOrder[i];
+    const isPrimary = endpoint === PRIMARY_ENDPOINT;
+    const wasCoolingDown = coolingDownAtStart.has(endpoint);
 
     try {
-      const data = await queryEndpointOnce(requestId, endpoint, query);
-      log(
-        requestId,
-        `request succeeded via ${endpointHost(endpoint)} after ${Date.now() - requestStart}ms total`
-      );
-      cacheResponse(key, data);
-      return NextResponse.json(data);
+      return succeed(endpoint, await queryEndpointOnce(requestId, endpoint, query), false);
     } catch (err) {
-      if (err instanceof EndpointError) errors.push(err);
-
-      // Query too heavy for Overpass's own [timeout:25] budget: no retry on the same endpoint
-      // and no mirror attempt — the same query won't get lighter elsewhere. Report straight back
-      // so the client halves just this chunk (lib/mapMatching.ts). Load-type failures (429,
-      // HTTP 504, client timeouts) keep the retry/fallback path below, since those may pass later.
-      if (err instanceof EndpointError && err.queryTimedOut) {
-        log(requestId, `${endpointHost(endpoint)} query timed out (remark), skipping retry/mirror so the client can split the chunk`);
+      if (recordFailure(endpoint, err)) {
+        stoppedOnQueryTimeout = true;
         break;
       }
 
-      const isRateLimited = err instanceof EndpointError && err.status === 429;
-      const isServerError = err instanceof EndpointError && isRetryableServerError(err.status);
+      let finalErr: unknown = err;
+      const status = err instanceof EndpointError ? err.status : 0;
+      const retryOnRateLimit = isPrimary && status === 429 && !wasCoolingDown;
+      const retryOnServerError = isPrimary && isRetryableServerError(status);
 
-      if (isPrimary && (isRateLimited || isServerError)) {
-        const delayMs = isRateLimited ? RATE_LIMIT_RETRY_DELAY_MS : PRIMARY_RETRY_DELAY_MS;
+      if (retryOnRateLimit || retryOnServerError) {
+        const delayMs = retryOnRateLimit ? RATE_LIMIT_RETRY_DELAY_MS : PRIMARY_RETRY_DELAY_MS;
         log(
           requestId,
-          isRateLimited
+          retryOnRateLimit
             ? `${endpointHost(endpoint)} rate-limited (429), backing off ${delayMs}ms before retrying same endpoint once`
-            : `${endpointHost(endpoint)} returned ${(err as EndpointError).status}, retrying same endpoint once after ${delayMs}ms`
+            : `${endpointHost(endpoint)} returned ${status}, retrying same endpoint once after ${delayMs}ms`
         );
         await sleep(delayMs);
 
         try {
-          const data = await queryEndpointOnce(requestId, endpoint, query);
-          log(
-            requestId,
-            `request succeeded via ${endpointHost(endpoint)} (retry) after ${Date.now() - requestStart}ms total`
-          );
-          cacheResponse(key, data);
-          return NextResponse.json(data);
+          return succeed(endpoint, await queryEndpointOnce(requestId, endpoint, query), true);
         } catch (retryErr) {
-          if (retryErr instanceof EndpointError) errors.push(retryErr);
-
-          if (retryErr instanceof EndpointError && retryErr.queryTimedOut) {
-            log(requestId, `${endpointHost(endpoint)} query timed out (remark) on retry, skipping mirror so the client can split the chunk`);
+          if (recordFailure(endpoint, retryErr)) {
+            stoppedOnQueryTimeout = true;
             break;
           }
+          finalErr = retryErr;
         }
+      } else if (isPrimary && status === 429 && wasCoolingDown) {
+        log(requestId, `${endpointHost(endpoint)} rate-limited (429) while already in cool-down, no backoff, moving on`);
       }
 
-      const hasNext = i < OVERPASS_ENDPOINTS.length - 1;
-      if (hasNext) {
-        log(
-          requestId,
-          `${endpointHost(endpoint)} failed, trying next endpoint: ${endpointHost(OVERPASS_ENDPOINTS[i + 1])}`
-        );
+      cooldownAfterFailover(endpoint, finalErr);
+
+      const next = tryOrder[i + 1];
+      if (next) {
+        log(requestId, `${endpointHost(endpoint)} failed, trying next endpoint: ${endpointHost(next)}`);
       }
     }
   }
 
   const totalMs = Date.now() - requestStart;
   const details = errors.map((e) => `${e.host}: ${e.message}`).join(" | ");
-  const queryTimedOut = errors.some((e) => e.queryTimedOut);
+  const queryTimedOut = stoppedOnQueryTimeout;
   log(
     requestId,
     queryTimedOut

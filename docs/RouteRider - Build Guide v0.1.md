@@ -138,7 +138,7 @@ Kernidee: Query-Auflösung ≠ Matching-Auflösung — die Overpass-Anfrage beko
 
 **Hinweis zum Testen von Commit 2:** der 429-Backoff-Pfad lässt sich nicht zuverlässig auf Kommando auslösen — beim STOP→Test hier auf die Cache-Verifikation konzentrieren (dieselbe Route innerhalb derselben Browser-Session zweimal hochladen, zweiter Durchlauf sollte spürbar schneller sein/keine neuen Overpass-Requests erzeugen). Der 429-Pfad wird nur bei Gelegenheit real bestätigt.
 
-- **Offener Punkt:** sehr lange Mehrtages-Routen (getestet: 192,8 km) sind noch nicht zuverlässig bestätigt — wird mit Commit 3 oben erneut getestet und möglicherweise aufgelöst. Bei weiterhin Timeouts: Eskalationsstufen im Abschnitt „Overpass-Resilienz" unten (Mirror-Failover → Postpass → bezahlter Anbieter).
+- **Offener Punkt:** sehr lange Mehrtages-Routen (getestet: 192,8 km) sind noch nicht zuverlässig bestätigt — wird mit Commit 3 oben erneut getestet und möglicherweise aufgelöst. Bei weiterhin Timeouts: Eskalationsstufen im Abschnitt „Overpass-Resilienz" unten (Mirror-Failover → Postpass-Fallback; ein bezahlter Anbieter ist seit 2026-11-25 ausgeschlossen).
 - **Long-route validation:** The 192.8 km test route could not yet be validated end-to-end due to repeated HTTP 504 and client-side timeouts during high Overpass server load. Chunking behavior and long-route reliability require an additional test under normal server conditions.
 
 ### Testrouten — zentrale Übersicht (Stand 2026-11-25)
@@ -157,7 +157,9 @@ Gilt für alle Änderungen an Overpass/Postpass, Map Matching oder Surface-Klass
 
 ### Overpass-Resilienz — Mirror-Failover & Eskalationsstufen (2026-11-25)
 
-**Kontext:** Die öffentlichen Overpass-Instanzen sind seit Monaten überlastet (siehe [OSM-Forum: Overpass API performance issues](https://community.openstreetmap.org/t/overpass-api-performance-issues/140598)). Die öffentlichen Instanzen werden privat/community-betrieben; für kommerzielle oder intensive Nutzung wird dort ausdrücklich auf eigene Instanz oder bezahlte Anbieter verwiesen. Deshalb Eskalation in Stufen — jede Stufe erst angehen, wenn die vorherige nachweislich nicht reicht. **Reihenfolge: Commit 2 → Commit 3 → Commit 4 (Stufe 1) → Stufe 2 (Bedarf am 2026-11-25 nachgewiesen, Commit 5a/5b) → bei Bedarf Stufe 3.**
+**Kontext:** Die öffentlichen Overpass-Instanzen sind seit Monaten überlastet (siehe [OSM-Forum: Overpass API performance issues](https://community.openstreetmap.org/t/overpass-api-performance-issues/140598)). Die öffentlichen Instanzen werden privat/community-betrieben; für kommerzielle oder intensive Nutzung wird dort ausdrücklich auf eigene Instanz oder bezahlte Anbieter verwiesen. Deshalb Eskalation in Stufen — jede Stufe erst angehen, wenn die vorherige nachweislich nicht reicht. **Reihenfolge: Commit 2 → Commit 3 → Commit 4 (Stufe 1) → Stufe 2 (Bedarf am 2026-11-25 nachgewiesen, Commit 5a/5b). Stufe 3 (bezahlter Dienst) ist nicht geplant.**
+
+- **Ausfallrisiko ohne SLA:** Beide Datenquellen — die öffentlichen Overpass-Instanzen und Postpass — sind kostenlose Community-Dienste ohne Garantie oder SLA. Fallen beide gleichzeitig aus, schlägt der Request mit einem Lastfehler fehl; die App zeigt dann eine Fehlermeldung, es gibt keine weitere Rückfallebene. Bewusst in Kauf genommen (kein bezahlter Dienst, siehe Stufe 3).
 
 **Stufe 1 — Mirror-Failover (Commit 4, Umsetzung jetzt vorgesehen)**
 
@@ -197,18 +199,20 @@ Bewusst klein gehalten: nur die Endpoint-Auswahl und das Fehlerhandling erweiter
   - **5b:** Postpass-Provider. Query: `postpass_line`, `osm_type='W'`, `tags ? 'highway'`, bbox-Vorfilter + `ST_DWithin(geom::geography, <Chunk-Linie>::geography, 40)` um dieselbe vereinfachte Chunk-Geometrie wie bei Overpass. Antwort wird ins Overpass-Format `{elements:[{type:"way", id, tags, geometry:[{lat,lon}]}]}` übersetzt, Tags über denselben Tag-Filter (7 Schlüssel). `lib/mapMatching.ts`, Cache-Schlüssel, Matching-Radius, Tag-Filter und Chunking bleiben unverändert.
 - **Wann der Fallback greift:** erst wenn alle Overpass-Endpoints an Last scheitern (429, 5xx, Netzwerkfehler, Timeout) — **oder** direkt, wenn beim Start eines Requests alle Overpass-Endpoints im Cool-Down sind (spart pro Chunk ~93–138s). **Nicht** bei `remark`: dann wie bisher abbrechen, Client halbiert. Postpass: strikt ein Versuch, kein Retry; scheitert er, Lastfehler an den Nutzer. Quelle im Log und im Header `X-Overpass-Endpoint: postpass`. EXPLAIN-Endpoint nur einmalig während der Entwicklung (Queue-Einstufung der Query prüfen), nicht pro Request; öffentliche URL nicht dokumentiert.
 - **Offene Datenlage (vor dem Merge klären bzw. beobachten):**
-  - **Limits:** Rate-Limits, Timeouts, Concurrency pro IP, Fair-Use- und Nutzungsbedingungen sind in Wiki/README/SCHEMA **nicht dokumentiert**. Dokumentiert ist nur: 3 Queues, Kosten werden vorab geschätzt, kleine Queries dürfen große überholen. Bei Bedarf bei Geofabrik nachfragen. Risiko: Postpass kann ebenfalls überlastet werden, wenn viele Overpass-Nutzer ausweichen.
+  - **Limits:** Rate-Limits, Timeouts, Concurrency pro IP, Fair-Use- und Nutzungsbedingungen sind in Wiki/README/SCHEMA **nicht dokumentiert**. Dokumentiert ist nur: 3 Queues, Kosten werden vorab geschätzt, kleine Queries dürfen große überholen. Eine Limits-Anfrage bei Geofabrik entfällt (Entscheidung 2026-11-25); die Limits werden nur über Beobachtung im Betrieb geklärt (Server-Log, Fehlercodes und Antwortzeiten von Postpass). Risiko: Postpass kann ebenfalls überlastet werden, wenn viele Overpass-Nutzer ausweichen.
   - **`area=yes`-Ways:** Geschlossene highway-Ways, die als Fläche getaggt sind (z. B. Fußgängerzonen `highway=pedestrian` + `area=yes`), landen bei osm2pgsql vermutlich in `postpass_polygon` statt `postpass_line` und würden dann fehlen, während Overpass sie liefert. Regel steht in `postpass.lua`, noch nicht geprüft. Vor allem in der Stadt relevant → Grunewald-Gegencheck; falls nötig `postpass_polygon` per `ST_Boundary` ergänzen.
   - Datenstand bis ~5 min alt (unkritisch); Abweichungen bei Gematcht/Mehrdeutig gegenüber Overpass sind als Datenunterschied zu werten, mehr „ohne Match“ dagegen als fehlende Wege.
 - **STOP → Test für Postpass (5b):** zuerst 18,9km mit `OVERPASS_ENDPOINTS=https://invalid.example/api/interpreter` (erzwingt den Postpass-Pfad) → 189 Segmente, 0 ohne Match, Header/Log zeigen `postpass`. Danach einmalig Grunewald als Stadt-Gegencheck vor dem Merge (wegen `area=yes`-Ways; Vergleich mit 1008 / 832 / 176 / 0). Sobald Overpass wieder antwortet: dieselbe Chunk-Query an beide Quellen schicken und Way-IDs vergleichen (Skript außerhalb des Repos).
 
-**Stufe 3 — Bezahlter Overpass-Dienst (Notfall-Option, falls Stufe 1+2 nicht reichen oder die App live geht)**
+**Stufe 3 — Bezahlter Overpass-Dienst: nicht geplant (Entscheidung Jonas, 2026-11-25: kein bezahlter Dienst)**
+
+*Die folgenden Preis- und Anfrageinformationen bleiben nur als Referenz stehen und werden **nicht verfolgt** (kein Kauf, keine Anfrage bei Geofabrik).*
 
 - **Geofabrik Overpass API** ([Preise](https://www.geofabrik.de/data/overpass-api.html), netto): Small 10.000 Requests/Monat = 40 €/Monat, Medium 100.000 = 80 €, Large 1.000.000 = 160 €, XXL unbegrenzt ab 550 €. Bezahlung **ein Jahr im Voraus** (also mindestens 480 € Verpflichtung bei Small). Preise gelten unter der Annahme, dass Queries die Server nicht übermäßig belasten. Auf der Seite stehen keine Angaben zu Rate-Limits oder Timeouts → **vor dem Kauf per Kontaktformular nach SLA, Timeout-Limit und Abdeckung (Planet oder Extrakt) fragen.**
 - **Mengengerüst:** Mit ~50km-Chunks sind es ca. 4 Requests pro 190km-Route (Cache senkt das weiter). Small (10.000 Requests) reicht damit rechnerisch für ~2.500 lange Routen im Monat.
 - Alternative kommerzielle Option: MapLark (eigenes API/GeoJSON, keine Overpass-QL → Query-Umbau nötig, daher nicht erste Wahl).
 - **Langfristig bei echtem Traffic:** eigener Overpass-Server oder PostGIS mit Geofabrik-Extrakt (Deutschland), auf kleinem eigenem Server (nicht auf Vercel lauffähig).
-- **Entscheidungsregel:** Stufe 3 erst, wenn (a) Stufe 1+2 nicht reichen UND (b) die App über Testnutzung hinaus echte Nutzer hat oder Jonas die Ausfälle beim Testen nicht mehr tolerieren will. Bis dahin: Public-Infrastruktur genügt laut Product Sheet Section 41 ("Infrastructure Principle") für Entwicklung und frühe Tests.
+- **Ursprüngliche Entscheidungsregel (überholt):** Stufe 3 erst, wenn (a) Stufe 1+2 nicht reichen UND (b) die App über Testnutzung hinaus echte Nutzer hat oder Jonas die Ausfälle beim Testen nicht mehr tolerieren will. **Ersetzt durch die Entscheidung vom 2026-11-25: kein bezahlter Dienst.** Es bleibt bei Public-Infrastruktur laut Product Sheet Section 41 ("Infrastructure Principle"), mit dem oben beschriebenen Ausfallrisiko ohne SLA.
 
 **Phase 4 — OSM Surface Analysis**: Klassifizierung Paved/Gravel/Trail/Unknown (Section 11) + Inference-Regeltabelle aus D7. ✅ erledigt — von Jonas als gut funktionierend bestätigt.
 
@@ -236,7 +240,7 @@ Hinweis aus den Phase-3-Tests: bei dichten Stadtrouten (z. B. Berlin-Innenstadt)
 
 ## 4. Was NICHT in v0.1 gehört
 
-Laut Product Sheet Section 42 explizit ausgeschlossen: Weather-Anpassung, feinere Surface-Roughness, User Accounts, Datenbank, Strava/Komoot-Integration, Routenplanung, Navigation, POIs, **Fueling** (kommt als v0.2), Social Features, native Apps. Räumliches Tile-Caching für Overpass (siehe oben) ebenfalls bewusst auf später verschoben. Ebenso nicht in v0.1: bezahlter Overpass-Dienst (Stufe 3 im Abschnitt „Overpass-Resilienz") — nur bei nachgewiesenem Bedarf. (Der Postpass-Fallback, Stufe 2, wurde am 2026-11-25 nach nachgewiesenem Bedarf in v0.1 aufgenommen.)
+Laut Product Sheet Section 42 explizit ausgeschlossen: Weather-Anpassung, feinere Surface-Roughness, User Accounts, Datenbank, Strava/Komoot-Integration, Routenplanung, Navigation, POIs, **Fueling** (kommt als v0.2), Social Features, native Apps. Räumliches Tile-Caching für Overpass (siehe oben) ebenfalls bewusst auf später verschoben. **Bewusst ausgeschlossen: bezahlter Overpass-Dienst** (Stufe 3 im Abschnitt „Overpass-Resilienz“; Entscheidung Jonas, 2026-11-25 — kein bezahlter Dienst, auch nicht bei weiteren Ausfällen). (Der Postpass-Fallback, Stufe 2, wurde am 2026-11-25 nach nachgewiesenem Bedarf in v0.1 aufgenommen.)
 
 ## 5. Design
 

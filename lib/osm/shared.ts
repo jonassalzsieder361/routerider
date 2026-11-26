@@ -23,6 +23,8 @@ export type WaysResult =
       upstreamStatus: number;
       /** Query too heavy (Overpass `remark`): the client halves this chunk (lib/mapMatching.ts). */
       queryTimedOut: boolean;
+      /** How many attempts failed (for the next provider's log line). */
+      failedAttempts?: number;
     };
 
 export function sleep(ms: number): Promise<void> {

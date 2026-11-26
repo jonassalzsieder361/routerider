@@ -65,6 +65,11 @@ function endpointsInTryOrder(now: number): string[] {
   return [...ready, ...coolingDown];
 }
 
+/** True when every configured Overpass endpoint is in cool-down — then Postpass is tried first. */
+export function allOverpassEndpointsCoolingDown(now: number): boolean {
+  return OVERPASS_ENDPOINTS.every((e) => isCoolingDown(e, now));
+}
+
 function startCooldown(requestId: string, endpoint: string, reason: string): void {
   cooldownUntil.set(endpoint, Date.now() + ENDPOINT_COOLDOWN_MS);
   log(requestId, `${endpointHost(endpoint)} put in ${ENDPOINT_COOLDOWN_MS / 1000}s cool-down (${reason})`);
@@ -375,5 +380,6 @@ export async function fetchFromOverpass(
     error: `${reason} Tried: ${details || "no endpoint responded"}.`,
     upstreamStatus: errors[0]?.status ?? 502,
     queryTimedOut,
+    failedAttempts: errors.length,
   };
 }

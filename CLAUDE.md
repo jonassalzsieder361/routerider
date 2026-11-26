@@ -9,6 +9,11 @@ Surface Inference): docs/RouteRider Tire Pressure - Resolved Decisions D4-D7.md
 Fueling Strategy ist Scope für v0.2, NICHT Teil des aktuellen Builds:
 docs/RouteRider - Fueling Strategy v0.2 Spec (Design Preview).md
 
+Konfiguration (optional, siehe .env.example): `OVERPASS_ENDPOINTS` — kommagetrennte
+Overpass-Endpoints in Priorität (erster = Primary), Default overpass-api.de →
+overpass.kumi.systems → overpass.private.coffee. Failover-Regeln: Build Guide,
+Abschnitt "Overpass-Resilienz", Stufe 1 (app/api/overpass/route.ts).
+
 Bei Unsicherheit über Produktlogik, Pressure-Berechnung, Surface-Klassifizierung,
 Map-Matching-Architektur, UX oder externe Services: NICHT eigenständig entscheiden,
 sondern nachfragen (siehe Hauptdokument, Section 45 "Development Rule").

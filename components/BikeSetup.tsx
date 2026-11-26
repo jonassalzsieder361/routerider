@@ -45,10 +45,10 @@ const WHEEL_DIAMETER_ORDER: WheelDiameter[] = ["700c", "650b", "26"];
 
 // v0.1 calibration bounds for this data-entry step only — not the D6 safety pressure
 // bounds (those clamp the Phase 7 pressure recommendation, a separate concern).
-const RIDER_WEIGHT_BOUNDS = { min: 30, max: 180, step: 1, default: 75 };
-const BIKE_WEIGHT_BOUNDS = { min: 5, max: 30, step: 0.5, default: 12 };
-const LUGGAGE_WEIGHT_BOUNDS = { min: 0, max: 40, step: 0.5, default: 5 };
-const TIRE_WIDTH_BOUNDS = { min: 20, max: 75, step: 1, default: 40 };
+const RIDER_WEIGHT_BOUNDS = { min: 30, max: 180, step: 1, default: 72 };
+const BIKE_WEIGHT_BOUNDS = { min: 5, max: 30, step: 0.5, default: 11 };
+const LUGGAGE_WEIGHT_BOUNDS = { min: 0, max: 40, step: 0.5, default: 1.5 };
+const TIRE_WIDTH_BOUNDS = { min: 20, max: 75, step: 1, default: 43 };
 const FRONT_PERCENT_BOUNDS = { min: 30, max: 60, step: 1 };
 
 interface NumberFieldProps {
